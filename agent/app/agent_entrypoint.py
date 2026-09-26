@@ -46,7 +46,7 @@ from livekit import agents, rtc
 from livekit.agents import Agent, AgentSession, JobContext, JobProcess, RunContext, metrics
 from livekit.agents.llm import ChatContext, ChatMessage, function_tool  # type: ignore
 from livekit.agents.voice.events import ConversationItemAddedEvent
-from livekit.plugins import silero  # type: ignore
+from livekit.plugins import sarvam, silero  # type: ignore  # noqa: F401 -- sarvam: see preload below
 
 from app.context.moss_memory import MossLiveMemory, RecallResult
 from app.context.moss_provider import MossContextProvider
@@ -69,7 +69,15 @@ from app.security.session_boundary import (
 )
 from app.tools.definitions import build_tool_registry
 from app.voice_providers.factory import build_stt, build_tts, prewarm_tts
-from app.voice_providers.llm_chain import build_llm
+from app.voice_providers.llm_chain import build_llm, preload_llm_plugins
+
+# LiveKit registers a plugin when it's imported and refuses to do so off the
+# main thread. With JOB_EXECUTOR=thread every call runs on a worker thread, so
+# a plugin first imported inside a call (as factory.py and llm_chain.py do)
+# would crash that call. Importing them here -- module load, main thread --
+# covers both executors: process mode's forkserver preloads whatever is
+# registered at startup.
+preload_llm_plugins()
 
 logger = logging.getLogger("agent.entrypoint")
 
@@ -252,11 +260,6 @@ class FieldOpsAssistant(Agent):
         return f"FAILED: {result.error}"
 
 
-async def aiter_db_session():
-    async for db in db_base.get_db():
-        yield db
-
-
 async def _record_boundary_failure(db, *, error: SessionBoundaryError, room_name: str) -> None:
     """Records an authentication-boundary rejection using ADR 001's routing
     rule: if the identity-resolution failure verified a real tenant before
@@ -289,7 +292,11 @@ async def _record_boundary_failure(db, *, error: SessionBoundaryError, room_name
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
 
-    db = await anext(aiter_db_session())
+    # Owned by this job and closed explicitly at shutdown. It used to come
+    # from `anext()` on a get_db() generator that nothing kept a reference
+    # to; when that generator was finalized, it closed the session while a
+    # query was still using it (IllegalStateChangeError at every call start).
+    db = db_base.get_session_maker()()
 
     try:
         authenticated = await establish_authenticated_session(
@@ -457,11 +464,24 @@ def prewarm(proc: JobProcess) -> None:
     proc.userdata["vad"] = silero.VAD.load()
 
 
+def _job_executor_type() -> agents.JobExecutorType:
+    """JOB_EXECUTOR=thread runs calls as threads inside the worker process.
+    The default, process, gives each call its own process -- better isolation,
+    but every process repeats the runtime's memory. On a 1 GB host that
+    overhead plus Moss's in-process embedding model got calls OOM-killed."""
+    value = os.environ.get("JOB_EXECUTOR", "process").strip().lower()
+    try:
+        return agents.JobExecutorType(value)
+    except ValueError:
+        raise ValueError(f"JOB_EXECUTOR must be 'process' or 'thread', got {value!r}") from None
+
+
 if __name__ == "__main__":
     agents.cli.run_app(
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
+            job_executor_type=_job_executor_type(),
             num_idle_processes=int(os.environ.get("NUM_IDLE_PROCESSES", "1")),
         )
     )

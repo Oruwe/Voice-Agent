@@ -138,6 +138,22 @@ def test_groq_sends_reasoning_effort_only_when_configured():
     assert "reasoning_effort" not in llm.call_args.kwargs
 
 
+def test_preload_imports_exactly_the_chains_plugins():
+    with _env(LLM_CHAIN="groq,sarvam"), patch("importlib.import_module") as imp:
+        llm_chain.preload_llm_plugins()
+    assert [c.args[0] for c in imp.call_args_list] == ["livekit.plugins.openai", "livekit.plugins.sarvam"]
+
+
+def test_preload_never_raises():
+    """It runs in prewarm: a broken plugin must not take the worker down."""
+    with _env(LLM_CHAIN="groq,nope"), patch("importlib.import_module") as imp:
+        llm_chain.preload_llm_plugins()  # invalid chain -> no-op
+    imp.assert_not_called()
+
+    with _env(LLM_CHAIN="gemini"), patch("importlib.import_module", side_effect=ImportError("boom")):
+        llm_chain.preload_llm_plugins()  # must not raise
+
+
 def test_unknown_provider_in_env_fails_at_startup():
     with _env(LLM_CHAIN="groq,nope"):
         with pytest.raises(ValueError, match="nope"):

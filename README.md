@@ -31,9 +31,9 @@ docs/adr/    Architecture decision records
   (`agent_entrypoint.py`, `context/embeddings.py`,
   `context/moss_provider.py`, `context/qdrant_provider.py`,
   `tools/definitions.py`) now have dedicated tests.
-- **Backend, current**: 198 tests pass against a real PostgreSQL
+- **Backend, current**: 208 tests pass against a real PostgreSQL
   (`pytest --ignore=tests/test_auth_identity.py` with `DATABASE_URL` set).
-  149 of them run without a database. Migration `0001` passes upgrade →
+  159 of them run without a database. Migration `0001` passes upgrade →
   downgrade → upgrade against the same server. `tests/test_auth_identity.py`
   fails to import because of an unrelated, pre-existing `ExpiredTokenError`
   symbol.

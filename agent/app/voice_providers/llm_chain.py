@@ -118,6 +118,34 @@ def _build_sarvam():
     )
 
 
+_PLUGIN_MODULE = {
+    "groq": "livekit.plugins.openai",
+    "gemini": "livekit.plugins.google",
+    "sarvam": "livekit.plugins.sarvam",
+}
+
+
+def preload_llm_plugins() -> None:
+    """Import the plugin for each provider in LLM_CHAIN, on the main thread.
+
+    Call at module load of the worker entrypoint: LiveKit only registers
+    plugins on the main thread (a call on a worker thread can't import one),
+    and importing livekit.plugins.google on a call's first turn blocked that
+    call's event loop for ~1.2 s. Never raises -- build_llm() reports a real
+    problem when a call starts."""
+    import importlib
+
+    try:
+        names = parse_chain(os.environ.get("LLM_CHAIN", DEFAULT_CHAIN))
+    except ValueError:
+        return
+    for name in names:
+        try:
+            importlib.import_module(_PLUGIN_MODULE[name])
+        except Exception:
+            logger.warning("could not preload the %s LLM plugin", name, exc_info=True)
+
+
 def _build_one(name: str):
     # Dispatched by name at call time rather than through a dict of function
     # references, which would freeze the bindings at import.

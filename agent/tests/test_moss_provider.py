@@ -134,6 +134,26 @@ async def test_upsert_context_creates_index_with_document_info(mock_client):
 
 
 @pytest.mark.asyncio
+async def test_upsert_context_accepts_chunk_text_output_unchanged(mock_client):
+    """chunk_text() emits an int `chunk` index and Moss's DocumentInfo takes
+    only str metadata values. That mismatch made every production upload
+    fail to index while the endpoint still answered 200."""
+    from app.context.document_processor import chunk_text
+
+    provider = make_provider(mock_client)
+    docs = chunk_text("pump maintenance schedule " * 60, doc_name="manual.pdf")
+    assert isinstance(docs[1]["metadata"]["chunk"], int)  # the shape that broke
+
+    await provider.upsert_context(tenant_id="tenant-a", logical_name="knowledge", docs=docs)
+
+    moss_docs = mock_client.create_index.await_args.args[1]
+    assert len(moss_docs) == len(docs)
+    assert moss_docs[1].metadata == {
+        "source": "manual.pdf", "chunk": "1", "doc_hash": docs[1]["metadata"]["doc_hash"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_upsert_context_falls_back_to_add_docs_when_create_fails(mock_client):
     mock_client.create_index.side_effect = RuntimeError("index already exists")
     provider = make_provider(mock_client)
