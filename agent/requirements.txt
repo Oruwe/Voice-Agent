@@ -1,8 +1,12 @@
-livekit-agents>=1.8
-livekit-plugins-google
-livekit-plugins-openai
-livekit-plugins-silero
-livekit-plugins-sarvam>=1.8
+# The LiveKit family is pinned to the release the test suite runs against:
+# the agent uses 1.8-specific APIs (the turn_handling dict, MetricsReport
+# fields), and an unpinned fresh build is how "passed locally, broke on
+# deploy" happens. Bump deliberately, together, with the tests.
+livekit-agents==1.8.3
+livekit-plugins-google==1.8.3
+livekit-plugins-openai==1.8.3
+livekit-plugins-silero==1.8.3
+livekit-plugins-sarvam==1.8.3
 python-dotenv
 moss
 pydantic
