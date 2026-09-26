@@ -61,6 +61,7 @@ from app.db.session_manager import (
     ToolCallRecorder,
     VoiceSessionRecorder,
 )
+from app.latency_log import record_turn_metrics
 from app.security.session_boundary import (
     SessionBoundaryError,
     enforce_single_participant,
@@ -420,6 +421,7 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_item(ev: ConversationItemAddedEvent) -> None:
         asyncio.create_task(_persist_turn(ev))
         asyncio.create_task(_remember_turn(ev))
+        record_turn_metrics(ev.item, session_id=session_id)
 
     session.on("conversation_item_added", _on_item)
 
