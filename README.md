@@ -189,6 +189,10 @@ Recording is **off unless `LATENCY_LOG_PATH` is set** — nothing is opened
 or written otherwise — and `app/latency_log.py` writes timings only, never
 transcript text.
 
+On a deployed worker, set `LATENCY_LOG_PATH=stdout`. Rows go to the worker's
+logs prefixed `LATENCY_ROW`, and `latency_report.py` reads a log export
+directly: it picks out the marked rows and skips every other line.
+
 What makes a comparison real rather than noise:
 
 - **Say the same things in both runs, in the same order.** Latency tracks

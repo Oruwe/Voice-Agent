@@ -110,6 +110,21 @@ def test_load_ignores_non_numeric_and_bool_values(tmp_path):
 # reports
 # --------------------------------------------------------------------------
 
+def test_load_reads_marked_rows_out_of_a_log_export(tmp_path):
+    """LATENCY_LOG_PATH=stdout rows arrive inside platform log lines."""
+    run = tmp_path / "worker-logs.txt"
+    run.write_text(
+        "2026-09-26T18:00:00Z [inf] registered worker\n"
+        '2026-09-26T18:00:05Z [inf] LATENCY_ROW {"e2e_latency": 0.8}\n'
+        'LATENCY_ROW {"e2e_latency": 0.6, "tts_node_ttfb": 0.2}\n',
+        encoding="utf-8",
+    )
+    series, kept, skipped = latency_report.load(str(run))
+    assert series["e2e_latency"] == [0.8, 0.6]
+    assert series["tts_node_ttfb"] == [0.2]
+    assert (kept, skipped) == (2, 1)
+
+
 def _write(path, values, key="e2e_latency"):
     path.write_text(
         "\n".join(json.dumps({key: v}) for v in values) + "\n", encoding="utf-8"
@@ -271,6 +286,36 @@ def test_recorder_tolerates_item_without_metrics(tmp_path):
     with patch.dict(os.environ, {"LATENCY_LOG_PATH": str(path)}):
         record_turn_metrics(SimpleNamespace(role="user", id="x"), session_id="s")
     assert not path.exists()
+
+
+def test_recorder_stdout_mode_prints_marked_rows_and_creates_no_file(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)  # a file literally named "stdout" would land here
+    with patch.dict(os.environ, {"LATENCY_LOG_PATH": "stdout"}):
+        record_turn_metrics(_turn(e2e_latency=0.5), session_id="room-7")
+        record_turn_metrics(_turn(e2e_latency=0.7), session_id="room-7")
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 2
+    assert all(line.startswith("LATENCY_ROW ") for line in lines)
+    rows = [json.loads(line.removeprefix("LATENCY_ROW ")) for line in lines]
+    assert [r["e2e_latency"] for r in rows] == [0.5, 0.7]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_stdout_rows_round_trip_through_the_report(tmp_path, monkeypatch, capsys):
+    """What the deployed worker prints is exactly what the report reads back."""
+    monkeypatch.chdir(tmp_path)
+    with patch.dict(os.environ, {"LATENCY_LOG_PATH": "stdout"}):
+        record_turn_metrics(_turn(e2e_latency=0.5, llm_node_ttft=0.3), session_id="s")
+
+    printed = capsys.readouterr().out.splitlines()
+    export = tmp_path / "export.txt"
+    export.write_text("".join(f"2026-09-26T18:00:00Z [inf] {line}\n" for line in printed), encoding="utf-8")
+
+    series, kept, skipped = latency_report.load(str(export))
+    assert series["e2e_latency"] == [0.5]
+    assert series["llm_node_ttft"] == [0.3]
+    assert (kept, skipped) == (1, 0)
 
 
 # --------------------------------------------------------------------------
