@@ -43,7 +43,9 @@ _REQUIRED_KEY = {
 # preflight_check.py reads this same table, so the model it verifies at boot is
 # exactly the one the worker will call.
 _MODEL = {
-    "groq": ("GROQ_MODEL", "llama-3.3-70b-versatile"),
+    # llama-3.3-70b-versatile was decommissioned for free/developer keys on
+    # 2026-08-16; gpt-oss-120b is Groq's recommended replacement.
+    "groq": ("GROQ_MODEL", "openai/gpt-oss-120b"),
     # gemini-2.0/2.5 models refuse new API keys ("no longer available to new
     # users", checked 2026-09-26); 3.5-flash-lite is Google's named successor.
     "gemini": ("GEMINI_MODEL", "gemini-3.5-flash-lite"),
@@ -67,6 +69,16 @@ def key_env(name: str) -> str:
     return _REQUIRED_KEY[name]
 
 
+def groq_reasoning_effort() -> str | None:
+    """GROQ_REASONING_EFFORT, or None when unset (the parameter isn't sent).
+
+    gpt-oss models reason before their first answer token, and the voice
+    pipeline waits for that token -- "low" keeps the wait short. Leave it
+    unset for a model that doesn't reason; Groq rejects the parameter there.
+    """
+    return os.environ.get("GROQ_REASONING_EFFORT", "").strip() or None
+
+
 def _temperature() -> float:
     return float(os.environ.get("LLM_TEMPERATURE", "0.6"))
 
@@ -74,12 +86,17 @@ def _temperature() -> float:
 def _build_groq():
     from livekit.plugins import openai
 
+    extra = {}
+    effort = groq_reasoning_effort()
+    if effort:
+        extra["reasoning_effort"] = effort
     return openai.LLM(
         model=model_for("groq"),
         api_key=os.environ["GROQ_API_KEY"],
         base_url="https://api.groq.com/openai/v1",
         _strict_tool_schema=False,
         temperature=_temperature(),
+        **extra,
     )
 
 

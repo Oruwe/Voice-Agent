@@ -38,12 +38,15 @@ def _run(coro):
 # --------------------------------------------------------------------------
 
 def test_groq_request_is_openai_compatible_with_bearer_key():
-    host, url, headers, body = preflight.llm_request("groq", "llama-3.3-70b-versatile", "gsk-x")
+    with _env():
+        os.environ.pop("GROQ_REASONING_EFFORT", None)
+        host, url, headers, body = preflight.llm_request("groq", "llama-3.3-70b-versatile", "gsk-x")
+    assert "reasoning_effort" not in body
     assert host == "api.groq.com"
     assert url == "https://api.groq.com/openai/v1/chat/completions"
     assert headers == {"Authorization": "Bearer gsk-x"}
     assert body["model"] == "llama-3.3-70b-versatile"
-    assert body["max_tokens"] == 1
+    assert body["max_completion_tokens"] == 16
 
 
 def test_gemini_key_goes_in_a_header_never_the_url():
@@ -52,7 +55,33 @@ def test_gemini_key_goes_in_a_header_never_the_url():
     assert "secret-key" not in url
     assert headers == {"x-goog-api-key": "secret-key"}
     assert url.endswith("/models/gemini-3.5-flash-lite:generateContent")
-    assert body["generationConfig"]["maxOutputTokens"] == 1
+    assert body["generationConfig"]["maxOutputTokens"] == 16
+
+
+def test_groq_request_carries_the_workers_reasoning_effort():
+    """Sent exactly as the worker sends it, so a model that rejects the
+    parameter fails in preflight rather than on the first live turn."""
+    with _env(GROQ_REASONING_EFFORT="low"):
+        _, _, _, body = preflight.llm_request("groq", "openai/gpt-oss-120b", "gsk-x")
+    assert body["reasoning_effort"] == "low"
+
+
+def test_sarvam_tts_check_uses_the_voice_the_agent_speaks_with():
+    with _env(SARVAM_TTS_MODEL="bulbul:v9", SARVAM_TTS_SPEAKER="kavya", SARVAM_TTS_LANGUAGE="hi-IN"):
+        payload = preflight.sarvam_tts_payload()
+    assert payload == {"text": "preflight check", "target_language_code": "hi-IN",
+                       "speaker": "kavya", "model": "bulbul:v9"}
+
+
+def test_sarvam_tts_check_defaults_match_the_agent():
+    from app.voice_providers.factory import tts_voice
+
+    with _env():
+        for var in ("SARVAM_TTS_MODEL", "SARVAM_TTS_SPEAKER", "SARVAM_TTS_LANGUAGE"):
+            os.environ.pop(var, None)
+        payload = preflight.sarvam_tts_payload()
+        assert (payload["model"], payload["speaker"], payload["target_language_code"]) == tts_voice()
+    assert payload["model"] != "bulbul:v2"  # deprecated by Sarvam
 
 
 @pytest.mark.parametrize("model, version", [
@@ -136,6 +165,33 @@ def test_check_uses_the_model_the_worker_will_call():
         r = _run(preflight.check_llm("groq", post=post))
     assert r.status == "AUTHENTICATED"
     assert sent["payload"]["model"] == "llama-custom"
+
+
+def test_unavailable_model_lists_what_the_key_can_use():
+    async def post(*_):
+        return 404, '{"error":{"code":"model_not_found"}}'
+
+    async def get(url, headers):
+        assert url.endswith("/openai/v1/models")
+        return 200, '{"data":[{"id":"openai/gpt-oss-120b"},{"id":"whisper-large-v3"},{"id":"qwen/qwen3.6-27b"}]}'
+
+    with _env(GROQ_MODEL="llama-3.3-70b-versatile"):
+        r = _run(preflight.check_llm("groq", post=post, get=get))
+    assert r.status == "REJECTED"
+    assert "Available: openai/gpt-oss-120b, qwen/qwen3.6-27b" in r.detail
+    assert "whisper" not in r.detail  # speech models aren't chat models
+
+
+def test_rejected_key_does_not_list_models():
+    async def post(*_):
+        return 401, '{"error":{"code":"invalid_api_key"}}'
+
+    async def get(*_):
+        raise AssertionError("a bad key can't list models either")
+
+    with _env():
+        r = _run(preflight.check_llm("groq", post=post, get=get))
+    assert "GROQ_API_KEY" in r.detail
 
 
 def test_transport_failure_is_an_error_not_a_crash():

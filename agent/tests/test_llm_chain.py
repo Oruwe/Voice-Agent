@@ -125,6 +125,19 @@ def test_missing_key_for_a_provider_not_in_the_chain_is_fine():
             assert llm_chain.build_llm() == "GEMINI"
 
 
+def test_groq_sends_reasoning_effort_only_when_configured():
+    """gpt-oss reasons before its first answer token; Groq rejects the
+    parameter for models that don't reason, so it's never sent by default."""
+    with _env(GROQ_REASONING_EFFORT="low"), patch("livekit.plugins.openai.LLM") as llm:
+        llm_chain._build_groq()
+    assert llm.call_args.kwargs["reasoning_effort"] == "low"
+
+    with _env(), patch("livekit.plugins.openai.LLM") as llm:
+        os.environ.pop("GROQ_REASONING_EFFORT", None)
+        llm_chain._build_groq()
+    assert "reasoning_effort" not in llm.call_args.kwargs
+
+
 def test_unknown_provider_in_env_fails_at_startup():
     with _env(LLM_CHAIN="groq,nope"):
         with pytest.raises(ValueError, match="nope"):

@@ -195,9 +195,18 @@ async def check_livekit() -> CheckResult:
         await lk.aclose()
 
 
+def sarvam_tts_payload() -> dict:
+    """The REST request livekit-plugins-sarvam sends, for the voice the agent
+    speaks with (factory.tts_voice -- the same function build_tts uses)."""
+    from app.voice_providers.factory import tts_voice
+
+    model, speaker, language = tts_voice()
+    return {"text": "preflight check", "target_language_code": language, "speaker": speaker, "model": model}
+
+
 async def check_sarvam_tts() -> CheckResult:
-    """Same endpoint, same request shape, same default model/speaker/language
-    as app/voice_providers/sarvam/tts.py's TTS class actually sends."""
+    """Same endpoint and request shape as the Sarvam plugin, with the agent's
+    own model, speaker and language -- a retired voice fails here, not mid-call."""
     key = os.environ.get("SARVAM_API_KEY")
     if not key:
         return CheckResult("MISSING", "SARVAM_API_KEY not set")
@@ -211,23 +220,22 @@ async def check_sarvam_tts() -> CheckResult:
     except ImportError:
         return CheckResult("ERROR", "aiohttp not installed (pip install aiohttp)")
 
+    payload = sarvam_tts_payload()
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 "https://api.sarvam.ai/text-to-speech",
                 headers={"api-subscription-key": key, "Content-Type": "application/json"},
-                json={
-                    "inputs": ["preflight check"],
-                    "target_language_code": "en-IN",
-                    "speaker": "anushka",
-                    "model": "bulbul:v2",
-                },
+                json=payload,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.headers.get("x-deny-reason") == "host_not_allowed":
                     return CheckResult("NETWORK BLOCKED", "egress proxy blocked api.sarvam.ai (host_not_allowed)")
                 if resp.status == 200:
-                    return CheckResult("AUTHENTICATED", "POST /text-to-speech -> 200 OK, audio returned")
+                    return CheckResult(
+                        "AUTHENTICATED",
+                        f"POST /text-to-speech -> 200 OK ({payload['model']}, speaker {payload['speaker']})",
+                    )
                 if resp.status in (401, 403):
                     return CheckResult("REJECTED", f"HTTP {resp.status} -- key rejected by Sarvam")
                 body = (await resp.text())[:150]
@@ -272,18 +280,24 @@ def llm_request(provider: str, model: str, key: str) -> tuple[str, str, dict, di
     so an exception message can't carry one into the logs."""
     ping = [{"role": "user", "content": "ping"}]
     if provider == "groq":
+        body = {"model": model, "messages": ping, "max_completion_tokens": 16}
+        effort = llm_chain.groq_reasoning_effort()
+        if effort:
+            # Sent exactly as the worker sends it: Groq rejects the parameter
+            # for models that don't reason, and that should fail here.
+            body["reasoning_effort"] = effort
         return (
             "api.groq.com",
             "https://api.groq.com/openai/v1/chat/completions",
             {"Authorization": f"Bearer {key}"},
-            {"model": model, "messages": ping, "max_tokens": 1},
+            body,
         )
     if provider == "gemini":
         return (
             "generativelanguage.googleapis.com",
             f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
             {"x-goog-api-key": key},
-            {"contents": [{"parts": [{"text": "ping"}]}], "generationConfig": {"maxOutputTokens": 1}},
+            {"contents": [{"parts": [{"text": "ping"}]}], "generationConfig": {"maxOutputTokens": 16}},
         )
     if provider == "sarvam":
         # livekit-plugins-sarvam serves sarvam-105b-conversations from /v1 and
@@ -293,7 +307,7 @@ def llm_request(provider: str, model: str, key: str) -> tuple[str, str, dict, di
             "api.sarvam.ai",
             f"https://api.sarvam.ai/{version}/chat/completions",
             {"api-subscription-key": key},
-            {"model": model, "messages": ping, "max_tokens": 1},
+            {"model": model, "messages": ping, "max_tokens": 16},
         )
     raise ValueError(f"no preflight request for LLM provider {provider!r}")
 
@@ -331,6 +345,43 @@ def classify_llm_response(provider: str, model: str, status: int, body: str) -> 
     return CheckResult("ERROR", f"HTTP {status}: {body[:150]}")
 
 
+async def _get_json(url: str, headers: dict) -> tuple[int, str]:
+    import aiohttp
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            return resp.status, await resp.text()
+
+
+async def available_models(provider: str, key: str, *, get=None) -> list[str] | None:
+    """Chat-capable model IDs this key can use, or None if the provider has no
+    listing endpoint or the listing fails. Turns "model X is gone" into
+    "use one of these"."""
+    import json
+
+    get = get or _get_json
+    try:
+        if provider == "groq":
+            status, body = await get("https://api.groq.com/openai/v1/models", {"Authorization": f"Bearer {key}"})
+            if status != 200:
+                return None
+            skip = ("whisper", "tts", "guard", "orpheus", "distil")
+            return sorted(m["id"] for m in json.loads(body).get("data", []) if not any(s in m["id"] for s in skip))
+        if provider == "gemini":
+            status, body = await get(
+                "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", {"x-goog-api-key": key}
+            )
+            if status != 200:
+                return None
+            return sorted(
+                m["name"].removeprefix("models/") for m in json.loads(body).get("models", [])
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+            )
+    except Exception:
+        return None
+    return None
+
+
 async def _post_json(url: str, headers: dict, payload: dict) -> tuple[int, str]:
     import aiohttp
 
@@ -343,9 +394,9 @@ async def _post_json(url: str, headers: dict, payload: dict) -> tuple[int, str]:
             return resp.status, await resp.text()
 
 
-async def check_llm(provider: str, *, post=None) -> CheckResult:
-    """One 1-token completion against `provider` with the model the worker
-    will call. `post` is injectable for tests; it defaults to aiohttp."""
+async def check_llm(provider: str, *, post=None, get=None) -> CheckResult:
+    """One tiny completion against `provider` with the model the worker will
+    call. `post`/`get` are injectable for tests; they default to aiohttp."""
     key = os.environ.get(llm_chain.key_env(provider), "").strip()
     if not key:
         return CheckResult("MISSING", f"{llm_chain.key_env(provider)} not set")
@@ -353,6 +404,8 @@ async def check_llm(provider: str, *, post=None) -> CheckResult:
     model = llm_chain.model_for(provider)
     host, url, headers, payload = llm_request(provider, model, key)
 
+    # Listing follows the transport: real network in real use, stubbed with post in tests.
+    can_list = post is None or get is not None
     if post is None:
         blocked = await egress_probe(host)
         if blocked:
@@ -369,7 +422,12 @@ async def check_llm(provider: str, *, post=None) -> CheckResult:
         return CheckResult("ERROR", f"{type(e).__name__}: {e}")
     if status == -1:
         return CheckResult("NETWORK BLOCKED", f"egress proxy blocked {host} (host_not_allowed)")
-    return classify_llm_response(provider, model, status, body)
+    result = classify_llm_response(provider, model, status, body)
+    if can_list and result.status == "REJECTED" and llm_chain.model_env(provider) in result.detail:
+        models = await available_models(provider, key, get=get)
+        if models:
+            result = result._replace(detail=f"{result.detail} Available: {', '.join(models[:30])}")
+    return result
 
 
 def llm_checks() -> list[tuple[str, object]]:
