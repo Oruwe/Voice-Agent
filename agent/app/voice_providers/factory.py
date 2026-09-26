@@ -49,6 +49,7 @@ def build_tts():
         output_audio_codec="linear16",
         speech_sample_rate=int(_env("SARVAM_TTS_SAMPLE_RATE", "24000")),
         min_buffer_size=int(_env("SARVAM_TTS_MIN_BUFFER", "30")),
+        max_chunk_length=int(_env("SARVAM_TTS_MAX_CHUNK", "150")),
         pace=float(_env("SARVAM_TTS_PACE", "1.05")),
     )
 

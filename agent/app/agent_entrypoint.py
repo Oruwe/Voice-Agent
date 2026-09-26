@@ -21,6 +21,12 @@ doing the lookup in `llm_node` keeps preemptive generation valid.
 TTS/STT: uses the OFFICIAL `livekit-plugins-sarvam` package via
 app/voice_providers/factory.py, which wraps the plugin with env-var-driven
 configuration and TTS prewarming.
+
+Barge-in: `turn_handling["interruption"]["mode"]` is pinned to "vad" (see the
+comment at the AgentSession construction site) so interruption behavior is
+identical in local dev and production, and `min_duration` is lowered from the
+SDK's 0.5s default so the agent stops talking almost as soon as the user
+starts.
 """
 from __future__ import annotations
 
@@ -374,8 +380,20 @@ async def entrypoint(ctx: JobContext) -> None:
         vad=ctx.proc.userdata.get("vad") or silero.VAD.load(),
         turn_handling={
             "endpointing": {
-                "min_delay": float(os.environ.get("MIN_ENDPOINTING_DELAY", "0.30")),
+                "min_delay": float(os.environ.get("MIN_ENDPOINTING_DELAY", "0.25")),
                 "max_delay": float(os.environ.get("MAX_ENDPOINTING_DELAY", "2.0")),
+            },
+            "interruption": {
+                # Pinned to "vad" instead of left to auto-detect: the SDK
+                # auto-resolves to the ML-based "adaptive" detector (an extra
+                # network hop to LiveKit's hosted inference) in local dev but
+                # disables it in production unless explicitly requested --
+                # dev and prod would otherwise feel different. "vad" uses the
+                # local Silero VAD we already load, so it's free and identical
+                # in both places.
+                "mode": os.environ.get("INTERRUPTION_MODE", "vad"),
+                "min_duration": float(os.environ.get("MIN_INTERRUPTION_DURATION", "0.3")),
+                "min_words": int(os.environ.get("MIN_INTERRUPTION_WORDS", "0")),
             },
             "preemptive_generation": {"enabled": True, "preemptive_tts": True},
         },
