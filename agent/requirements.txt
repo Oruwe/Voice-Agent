@@ -1,12 +1,10 @@
-livekit-agents
+livekit-agents>=1.8
 livekit-plugins-google
 livekit-plugins-openai
 livekit-plugins-silero
-livekit-plugins-sarvam
+livekit-plugins-sarvam>=1.8
 python-dotenv
 moss
-qdrant-client
-sentence-transformers
 pydantic
 aiohttp
 sqlalchemy[asyncio]
@@ -15,3 +13,7 @@ alembic
 fastapi
 pyjwt
 uvicorn
+qdrant-client[fastembed]
+pypdf>=3.0
+python-docx>=1.0
+python-multipart

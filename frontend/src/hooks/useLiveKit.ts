@@ -11,7 +11,7 @@ import {
 } from "livekit-client";
 import { AGENT_STATE_ATTRIBUTE, DEFAULT_ROOM_OPTIONS, classifyParticipant, parseAgentState } from "../lib/livekit";
 import { generateId } from "../lib/auth";
-import type { AgentState, ToolEvent, TranscriptEntry } from "../types/transcript";
+import type { AgentState, ToolEvent, TranscriptEntry, TurnLatency } from "../types/transcript";
 import type { AppErrorInfo, MicPhase, SessionPhase } from "../types/livekit";
 
 const DISCONNECT_REASON_LABEL: Partial<Record<DisconnectReason, string>> = {
@@ -40,6 +40,28 @@ function tryParseToolEvent(raw: unknown): Omit<ToolEvent, "id" | "receivedAt" | 
   return { name, status, detail };
 }
 
+interface PendingTurn {
+  userText: string;
+  userFinalAt: number;
+  thinkingAt?: number;
+  mossMs?: number;
+  mossHits?: number;
+}
+
+/**
+ * Parse the Moss recall detail string like "3 hits in 42.3 ms (search 12.1 ms)"
+ * Returns { hits, ms } — prefers the parenthetical search ms when present.
+ */
+function parseMossDetail(detail: string): { hits: number; ms: number } | null {
+  const hitsMatch = /^(\d+)\s+hits?\s+in\s+([\d.]+)\s*ms/i.exec(detail);
+  if (!hitsMatch) return null;
+  const hits = parseInt(hitsMatch[1], 10);
+  const totalMs = parseFloat(hitsMatch[2]);
+  const searchMatch = /\(search\s+([\d.]+)\s*ms\)/i.exec(detail);
+  const ms = searchMatch ? parseFloat(searchMatch[1]) : totalMs;
+  return { hits, ms };
+}
+
 export function useLiveKit() {
   const roomRef = useRef<Room | null>(null);
   const [connectionPhase, setConnectionPhase] = useState<SessionPhase>("signed_out");
@@ -51,6 +73,12 @@ export function useLiveKit() {
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [toolEvents, setToolEvents] = useState<ToolEvent[]>([]);
   const [errors, setErrors] = useState<AppErrorInfo[]>([]);
+  const [turnLatencies, setTurnLatencies] = useState<TurnLatency[]>([]);
+
+  // Track previous agent state to detect transitions without extra state renders
+  const agentStateRef = useRef<AgentState>("idle");
+  // Pending latency data for the in-flight turn
+  const pendingTurnRef = useRef<PendingTurn | null>(null);
 
   const pushError = useCallback((title: string, message: string) => {
     setErrors((prev) => [...prev, { id: generateId("err"), title, message, at: Date.now() }]);
@@ -80,8 +108,12 @@ export function useLiveKit() {
         }
       });
 
+      room.on(RoomEvent.Reconnected, () => {
+        setConnectionPhase("connected");
+      });
+
       room.on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
-        setConnectionPhase("signed_out"); // caller decides whether to route back to ready_to_connect
+        setConnectionPhase("signed_out");
         setMicPhase("stopped");
         setAgentState("idle");
         setAgentIdentity(null);
@@ -101,14 +133,21 @@ export function useLiveKit() {
         element.dataset.livekitAgentAudio = "true";
         document.body.appendChild(element);
 
-        void element.play().catch((err: unknown) => {
-          pushError(
-            "Audio playback blocked",
-            err instanceof Error
-              ? err.message
-              : "Click the page and reconnect to enable audio.",
-          );
-        });
+        const tryPlay = (attempt: number) => {
+          element.play().catch((err: unknown) => {
+            if (attempt < 3) {
+              setTimeout(() => tryPlay(attempt + 1), 200 * attempt);
+            } else {
+              pushError(
+                "Audio playback blocked",
+                err instanceof Error
+                  ? err.message
+                  : "Click the page and reconnect to enable audio.",
+              );
+            }
+          });
+        };
+        tryPlay(1);
       });
 
       room.on(RoomEvent.TrackUnsubscribed, (track, _publication, participant) => {
@@ -141,7 +180,46 @@ export function useLiveKit() {
           if (participant.isLocal) return;
           if (AGENT_STATE_ATTRIBUTE in changed) {
             const state = parseAgentState(changed[AGENT_STATE_ATTRIBUTE]);
-            if (state) setAgentState(state);
+            if (state) {
+              const prevState = agentStateRef.current;
+              agentStateRef.current = state;
+              setAgentState(state);
+
+              const now = Date.now();
+
+              if (state === "thinking" && prevState !== "thinking") {
+                // Record when agent started thinking (end of user speech endpointing)
+                if (pendingTurnRef.current) {
+                  pendingTurnRef.current.thinkingAt = now;
+                }
+              }
+
+              if (state === "speaking" && prevState !== "speaking") {
+                // Compute latency for the completed turn
+                const pending = pendingTurnRef.current;
+                if (pending) {
+                  const totalMs = now - pending.userFinalAt;
+                  const eouMs =
+                    pending.thinkingAt !== undefined
+                      ? pending.thinkingAt - pending.userFinalAt
+                      : undefined;
+                  const thinkMs =
+                    pending.thinkingAt !== undefined ? now - pending.thinkingAt : undefined;
+
+                  const latency: TurnLatency = {
+                    id: generateId("lat"),
+                    userText: pending.userText,
+                    totalMs,
+                    eouMs,
+                    thinkMs,
+                    mossMs: pending.mossMs,
+                    mossHits: pending.mossHits,
+                  };
+                  setTurnLatencies((prev) => [...prev, latency]);
+                  pendingTurnRef.current = null;
+                }
+              }
+            }
           }
         },
       );
@@ -164,6 +242,19 @@ export function useLiveKit() {
       room.on(RoomEvent.TranscriptionReceived, (segments, participant) => {
         const localIdentity = room.localParticipant.identity;
         const speaker = participant ? classifyParticipant(participant.identity, localIdentity) : "unknown";
+
+        // Latency tracking: record when the user's utterance is final
+        if (speaker === "user") {
+          for (const segment of segments) {
+            if (segment.final && segment.text.trim()) {
+              pendingTurnRef.current = {
+                userText: segment.text.trim(),
+                userFinalAt: segment.lastReceivedTime,
+              };
+            }
+          }
+        }
+
         setTranscript((prev) => {
           const byId = new Map(prev.map((entry) => [entry.id, entry] as const));
           for (const segment of segments) {
@@ -185,15 +276,28 @@ export function useLiveKit() {
         if (topic !== "tool_call" && topic !== "tool_result" && topic !== "tool_event") return;
         try {
           const text = new TextDecoder().decode(payload);
-          const parsed = tryParseToolEvent(JSON.parse(text));
+          const raw = JSON.parse(text) as Record<string, unknown>;
+
+          // Moss recall events arrive on topic="tool_event" with name="moss_recall".
+          // Extract timing before forwarding to toolEvents so latency badges
+          // can show knowledge-base hit info inline on the transcript.
+          if (typeof raw.name === "string" && raw.name === "moss_recall") {
+            const detail = typeof raw.detail === "string" ? raw.detail : "";
+            const mossParsed = parseMossDetail(detail);
+            if (mossParsed && pendingTurnRef.current) {
+              pendingTurnRef.current.mossMs = mossParsed.ms;
+              pendingTurnRef.current.mossHits = mossParsed.hits;
+            }
+          }
+
+          const parsed = tryParseToolEvent(raw);
           if (!parsed) return;
           setToolEvents((prev) => [
             ...prev,
             { ...parsed, id: generateId("tool"), receivedAt: Date.now(), raw: text },
           ]);
         } catch {
-          // Malformed payload from an untrusted source -- drop it rather than
-          // displaying something we can't attribute to a real tool event.
+          // Malformed payload from an untrusted source — drop silently.
         }
       });
 
@@ -240,6 +344,9 @@ export function useLiveKit() {
     roomRef.current = null;
     setTranscript([]);
     setToolEvents([]);
+    setTurnLatencies([]);
+    pendingTurnRef.current = null;
+    agentStateRef.current = "idle";
     setConnectionPhase("ready_to_connect");
   }, []);
 
@@ -297,6 +404,7 @@ export function useLiveKit() {
     agentAudioLevel,
     transcript,
     toolEvents,
+    turnLatencies,
     errors,
     dismissError,
     connect,

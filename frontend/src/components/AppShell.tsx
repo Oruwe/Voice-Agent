@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import type { ThemePreference } from "../hooks/useTheme";
-import type { AgentState, ToolEvent, TranscriptEntry } from "../types/transcript";
+import type { AgentState, ToolEvent, TranscriptEntry, TurnLatency } from "../types/transcript";
 import type { AppErrorInfo, MicPhase, SessionPhase } from "../types/livekit";
 import { ThemeToggle } from "./ThemeToggle";
 import { ConnectionStatus } from "./ConnectionStatus";
@@ -9,6 +9,8 @@ import { VoiceControls } from "./VoiceControls";
 import { TranscriptPanel } from "./TranscriptPanel";
 import { ToolEventCard } from "./ToolEventCard";
 import { ErrorBanner } from "./ErrorBanner";
+import { DocumentUpload } from "./DocumentUpload";
+import { LatencyMonitor } from "./LatencyMonitor";
 
 interface AppShellProps {
   themePreference: ThemePreference;
@@ -23,6 +25,7 @@ interface AppShellProps {
   agentAudioLevel: number;
   transcript: TranscriptEntry[];
   toolEvents: ToolEvent[];
+  latencies: TurnLatency[];
   errors: AppErrorInfo[];
   onDismissError: (id: string) => void;
   onConnect: () => void;
@@ -32,9 +35,10 @@ interface AppShellProps {
   onToggleMute: () => void;
   signInSlot: ReactNode;
   showSignIn: boolean;
+  accessToken?: string | null;
 }
 
-type PanelTab = "transcript" | "events";
+type RightTab = "latency" | "documents" | "events";
 
 export function AppShell({
   themePreference,
@@ -49,6 +53,7 @@ export function AppShell({
   agentAudioLevel,
   transcript,
   toolEvents,
+  latencies,
   errors,
   onDismissError,
   onConnect,
@@ -58,9 +63,20 @@ export function AppShell({
   onToggleMute,
   signInSlot,
   showSignIn,
+  accessToken,
 }: AppShellProps) {
-  const [activeTab, setActiveTab] = useState<PanelTab>("transcript");
+  const [rightTab, setRightTab] = useState<RightTab>("latency");
   const isConnected = connectionPhase === "connected";
+
+  const lastLatency = latencies[latencies.length - 1];
+  const lastMs = lastLatency?.totalMs;
+
+  function latencyDisplayColor(ms: number | undefined): string {
+    if (ms === undefined) return "var(--text-muted)";
+    if (ms < 400) return "var(--latency-fast)";
+    if (ms < 700) return "var(--latency-mid)";
+    return "var(--latency-slow)";
+  }
 
   return (
     <div className="app-shell">
@@ -103,7 +119,8 @@ export function AppShell({
         <main className="app-main app-main--centered">{signInSlot}</main>
       ) : (
         <main className="app-main app-grid">
-          <section className="panel panel--session" aria-label="Voice session">
+          {/* Left: voice panel */}
+          <section className="panel panel--voice" aria-label="Voice session">
             <VoiceVisualizer
               agentState={agentState}
               connectionPhase={connectionPhase}
@@ -120,35 +137,77 @@ export function AppShell({
               onStopMic={onStopMic}
               onToggleMute={onToggleMute}
             />
+            <div className="panel__separator" aria-hidden="true" />
+            <div className="panel__session-summary">
+              <div className="session-summary__row">
+                <span className="session-summary__label">Last latency</span>
+                <span
+                  className="session-summary__value"
+                  style={{ color: latencyDisplayColor(lastMs) }}
+                >
+                  {lastMs !== undefined ? `${lastMs}ms` : "--"}
+                </span>
+              </div>
+              <div className="session-summary__row">
+                <span className="session-summary__label">Turns</span>
+                <span className="session-summary__value">{latencies.length}</span>
+              </div>
+            </div>
           </section>
 
-          <section className="panel panel--activity" aria-label="Session activity">
+          {/* Center: conversation */}
+          <section className="panel panel--conversation" aria-label="Conversation transcript">
+            <div className="panel__header">
+              <h2 className="panel__header-title">Conversation</h2>
+            </div>
+            <TranscriptPanel entries={transcript} isConnected={isConnected} latencies={latencies} />
+          </section>
+
+          {/* Right: intelligence panel */}
+          <section className="panel panel--intelligence" aria-label="Session intelligence">
             <div className="panel-tabs" role="tablist">
               <button
                 type="button"
                 role="tab"
-                aria-selected={activeTab === "transcript"}
-                className={`panel-tabs__tab${activeTab === "transcript" ? " is-active" : ""}`}
-                onClick={() => setActiveTab("transcript")}
+                aria-selected={rightTab === "latency"}
+                className={`panel-tabs__tab${rightTab === "latency" ? " is-active" : ""}`}
+                onClick={() => setRightTab("latency")}
               >
-                Transcript
+                Latency
+                {latencies.length > 0 && (
+                  <span className="panel-tabs__badge">{latencies.length}</span>
+                )}
               </button>
               <button
                 type="button"
                 role="tab"
-                aria-selected={activeTab === "events"}
-                className={`panel-tabs__tab${activeTab === "events" ? " is-active" : ""}`}
-                onClick={() => setActiveTab("events")}
+                aria-selected={rightTab === "documents"}
+                className={`panel-tabs__tab${rightTab === "documents" ? " is-active" : ""}`}
+                onClick={() => setRightTab("documents")}
               >
-                Tool events
-                {toolEvents.length > 0 && <span className="panel-tabs__badge">{toolEvents.length}</span>}
+                Docs
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={rightTab === "events"}
+                className={`panel-tabs__tab${rightTab === "events" ? " is-active" : ""}`}
+                onClick={() => setRightTab("events")}
+              >
+                Events
+                {toolEvents.length > 0 && (
+                  <span className="panel-tabs__badge">{toolEvents.length}</span>
+                )}
               </button>
             </div>
             <div className="panel-tabs__panels">
-              <div role="tabpanel" hidden={activeTab !== "transcript"}>
-                <TranscriptPanel entries={transcript} isConnected={isConnected} />
+              <div role="tabpanel" hidden={rightTab !== "latency"}>
+                <LatencyMonitor latencies={latencies} isConnected={isConnected} />
               </div>
-              <div role="tabpanel" hidden={activeTab !== "events"}>
+              <div role="tabpanel" hidden={rightTab !== "documents"}>
+                <DocumentUpload accessToken={accessToken ?? null} />
+              </div>
+              <div role="tabpanel" hidden={rightTab !== "events"}>
                 <ToolEventCard events={toolEvents} isConnected={isConnected} />
               </div>
             </div>

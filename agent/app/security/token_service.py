@@ -21,7 +21,7 @@ structurally incapable of running outside dev).
 import logging
 import os
 
-from fastapi import FastAPI, Header, HTTPException, status
+from fastapi import FastAPI, File, Header, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -29,6 +29,9 @@ from sqlalchemy import select
 from app.db.base import get_session_maker
 from app.db.models import Tenant, TenantStatus, User, UserStatus
 from app.db.session_manager import AuditRecorder, SecurityEventRecorder, is_tenant_verified
+from app.context.document_processor import chunk_text, parse_document
+from app.context.moss_provider import MossContextProvider
+from app.context.qdrant_provider import QdrantProvider
 from app.security.identity import AuthenticatedIdentity, IdentityResolutionError, resolve_identity
 from app.security.jwt_auth import AuthError, create_access_token, decode_access_token
 from app.security.livekit_identity import mint_livekit_token
@@ -214,3 +217,81 @@ async def issue_livekit_token(
     return LiveKitTokenResponse(
         livekit_token=livekit_token, tenant_id=str(identity.tenant_id), user_id=str(identity.user_id),
     )
+
+
+class UploadDocumentResponse(BaseModel):
+    document_id: str
+    chunks: int
+    status: str
+
+
+async def _resolve_bearer(authorization: str) -> AuthenticatedIdentity:
+    """Shared auth check for endpoints that require an application JWT."""
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Expected 'Authorization: Bearer <token>'",
+        )
+    raw_token = authorization.removeprefix("Bearer ").strip()
+    try:
+        payload = decode_access_token(raw_token)
+    except AuthError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from e
+
+    async with get_session_maker()() as db:
+        try:
+            return await resolve_identity(db, external_id=payload.sub, tenant_slug=payload.tenant_slug)
+        except IdentityResolutionError as e:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized") from e
+
+
+@app.post("/v1/documents/upload", response_model=UploadDocumentResponse)
+async def upload_document(
+    file: UploadFile = File(...),
+    authorization: str = Header(...),
+) -> UploadDocumentResponse:
+    """Index a document (PDF, DOCX, or TXT) into the tenant knowledge base.
+
+    Chunks are upserted into both the Moss knowledge index (queried inline on
+    every voice turn) and Qdrant (keyword-triggered deep retrieval). Requires a
+    valid application JWT — same bearer token issued by /v1/dev/token or
+    /v1/livekit/token.
+    """
+    identity = await _resolve_bearer(authorization)
+    tenant_id = identity.tenant_slug  # Moss/Qdrant use the slug as namespace
+
+    content = await file.read()
+    try:
+        text = parse_document(content, file.content_type or "")
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
+
+    chunks = chunk_text(text, doc_name=file.filename or "document")
+    if not chunks:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Could not extract text from document",
+        )
+
+    doc_id = chunks[0]["id"].split(":")[0]  # stable hash prefix shared by all chunks
+
+    # Upsert to Moss knowledge index — queried inline on every voice turn.
+    try:
+        moss = MossContextProvider(
+            project_id=os.environ["MOSS_PROJECT_ID"],
+            project_key=os.environ["MOSS_PROJECT_KEY"],
+        )
+        await moss.upsert_context(tenant_id=tenant_id, logical_name="knowledge", docs=chunks)
+    except Exception:
+        logger.exception("moss upsert failed for tenant %s doc %s", tenant_id, doc_id)
+
+    # Upsert to Qdrant if configured — keyword-triggered deeper retrieval.
+    if os.environ.get("QDRANT_URL"):
+        try:
+            qdrant = QdrantProvider()
+            await qdrant.upsert(tenant_id=tenant_id, docs=chunks)
+        except Exception:
+            logger.exception("qdrant upsert failed for tenant %s doc %s", tenant_id, doc_id)
+
+    logger.info("indexed doc %s for tenant %s: %d chunks", doc_id, tenant_id, len(chunks))
+    return UploadDocumentResponse(document_id=doc_id, chunks=len(chunks), status="indexed")

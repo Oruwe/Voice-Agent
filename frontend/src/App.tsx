@@ -22,6 +22,7 @@ function App() {
     agentAudioLevel,
     transcript,
     toolEvents,
+    turnLatencies,
     errors,
     dismissError,
     connect,
@@ -86,6 +87,7 @@ function App() {
       agentAudioLevel={agentAudioLevel}
       transcript={transcript}
       toolEvents={toolEvents}
+      latencies={turnLatencies}
       errors={errors}
       onDismissError={dismissError}
       onConnect={handleConnect}
@@ -95,6 +97,7 @@ function App() {
       onToggleMute={toggleMute}
       signInSlot={signInSlot}
       showSignIn={showSignIn}
+      accessToken={session?.accessToken}
     />
   );
 }

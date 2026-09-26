@@ -1,5 +1,6 @@
 import type { AgentState } from "../types/transcript";
 import type { MicPhase, SessionPhase } from "../types/livekit";
+import { WaveformBars } from "./WaveformBars";
 
 interface VoiceVisualizerProps {
   agentState: AgentState;
@@ -11,27 +12,27 @@ interface VoiceVisualizerProps {
 
 const STATE_LABEL: Record<AgentState, string> = {
   idle: "Idle",
-  initializing: "Initializing",
+  initializing: "Init",
   listening: "Listening",
-  thinking: "Processing",
+  thinking: "Thinking",
   speaking: "Speaking",
 };
 
-const METER_SEGMENTS = 5;
+const ORB_COLOR: Record<AgentState, string> = {
+  idle: "var(--text-faint)",
+  initializing: "var(--text-muted)",
+  listening: "var(--accent-listen)",
+  thinking: "var(--accent-think)",
+  speaking: "var(--accent-speak)",
+};
 
-function Meter({ label, level, active }: { label: string; level: number; active: boolean }) {
-  const litCount = active ? Math.round(Math.min(1, Math.max(0, level)) * METER_SEGMENTS) : 0;
-  return (
-    <div className="meter">
-      <span className="meter__label">{label}</span>
-      <div className="meter__bars" role="img" aria-label={`${label} audio level ${Math.round(level * 100)} percent`}>
-        {Array.from({ length: METER_SEGMENTS }, (_, index) => (
-          <span key={index} className={`meter__bar${index < litCount ? " is-lit" : ""}`} />
-        ))}
-      </div>
-    </div>
-  );
-}
+const ORB_GLOW: Record<AgentState, string> = {
+  idle: "none",
+  initializing: "none",
+  listening: "0 0 18px 4px var(--accent-listen-soft)",
+  thinking: "0 0 18px 4px var(--accent-think-soft)",
+  speaking: "0 0 18px 4px var(--accent-speak-soft)",
+};
 
 export function VoiceVisualizer({
   agentState,
@@ -41,19 +42,40 @@ export function VoiceVisualizer({
   agentAudioLevel,
 }: VoiceVisualizerProps) {
   const isLive = connectionPhase === "connected";
-  const ringState = isLive ? agentState : "idle";
+  const displayState = isLive ? agentState : "idle";
+
+  const stateLabel = isLive
+    ? STATE_LABEL[agentState]
+    : connectionPhase === "connecting"
+      ? "Connecting"
+      : "Not connected";
+
+  const userActive = isLive && micPhase === "started";
+  const agentActive = isLive && (agentState === "speaking");
 
   return (
     <div className="visualizer">
-      <div className={`visualizer__ring visualizer__ring--${ringState}`} aria-hidden="true">
-        <div className="visualizer__core" />
-      </div>
+      <div
+        className="visualizer__orb"
+        style={{
+          background: ORB_COLOR[displayState],
+          boxShadow: ORB_GLOW[displayState],
+        }}
+        aria-hidden="true"
+      />
       <p className="visualizer__state" aria-live="polite">
-        {isLive ? STATE_LABEL[agentState] : connectionPhase === "connecting" ? "Connecting…" : "Not connected"}
+        {stateLabel}
       </p>
-      <div className="visualizer__meters">
-        <Meter label="You" level={localAudioLevel} active={isLive && micPhase === "started"} />
-        <Meter label="Agent" level={agentAudioLevel} active={isLive} />
+
+      <div className="visualizer__waveforms">
+        <div className="visualizer__waveform-group">
+          <WaveformBars level={localAudioLevel} isActive={userActive} color="teal" />
+          <span className="visualizer__waveform-label">You</span>
+        </div>
+        <div className="visualizer__waveform-group">
+          <WaveformBars level={agentAudioLevel} isActive={agentActive} color="purple" />
+          <span className="visualizer__waveform-label">Agent</span>
+        </div>
       </div>
     </div>
   );

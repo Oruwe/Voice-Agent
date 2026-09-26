@@ -38,4 +38,12 @@ export function findAgentParticipant(
 export const DEFAULT_ROOM_OPTIONS: RoomOptions = {
   adaptiveStream: true,
   dynacast: true,
+  audioCaptureDefaults: {
+    autoGainControl: true,
+    noiseSuppression: true,
+    echoCancellation: true,
+  },
+  audioOutput: {
+    deviceId: "default",
+  },
 };

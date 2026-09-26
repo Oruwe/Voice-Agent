@@ -14,3 +14,5 @@ venv/
 .env.*
 !.env.example
 !.env.production.example
+.aider*
+fix_voice_agent.ps1

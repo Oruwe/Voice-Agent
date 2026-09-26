@@ -1,94 +1,88 @@
 """
-Application-level JWT — authenticates a user to THIS backend, separate from
-and prior to the LiveKit access token issued afterward (see
-livekit_identity.py). This is a clean build: `app/security/` was a 0-byte
-empty placeholder before this session, confirmed by checking it directly
-rather than assuming. No existing JWT implementation exists anywhere in
-this project to inspect or preserve.
+JWT creation and verification for the token service.
 
-Design (HS256, `sub`/`tenant_slug`/`exp`/`iss` claims, explicit exception
-hierarchy) is informed by a proven, separately-tested pattern from an
-earlier, distinct FastAPI gateway project built earlier in this
-conversation — adapted here, not copy-pasted, since that project doesn't
-exist in this codebase and had no `user_id` claim at all (this one does,
-because that's this milestone's actual requirement).
-
-This JWT answers "who is this, and which tenant are they claiming to
-belong to" at the authentication boundary. It does NOT by itself grant
-access to anything — `identity.py`'s `resolve_identity()` is what turns
-these claims into a validated, DB-backed `AuthenticatedIdentity`, checking
-the user and tenant actually exist and are active. A merely-valid JWT
-signature is necessary but not sufficient.
+Signs with HS256 using JWT_SECRET. Every token carries:
+  sub         — the user's external_id (stable identity, not a DB UUID)
+  tenant_slug — so the token service can re-validate the tenant without
+                a separate lookup before the Postgres call
+  iss         — must match JWT_ISSUER to prevent cross-service reuse
+  exp         — enforced on decode; expired tokens are rejected hard
 """
+from __future__ import annotations
+
 import os
-from datetime import datetime, timedelta, timezone
+import time
+from dataclasses import dataclass
 
 import jwt
-from pydantic import BaseModel
 
-
-class TokenPayload(BaseModel):
-    sub: str            # the user's external_id (stable identifier from whatever identity source authenticated them)
-    tenant_slug: str     # which tenant they're claiming to belong to — re-validated against Postgres downstream
-    iat: int
-    exp: int
-    iss: str
+TOKEN_EXPIRY_SECONDS = 3600  # 1 hour
 
 
 class AuthError(Exception):
-    """Base for all token problems. Callers that just need a yes/no can
-    catch this; callers that need to distinguish reasons (e.g. to decide
-    whether re-auth vs. re-login is appropriate) can catch the specific
-    subclasses below."""
+    """Raised when JWT creation or verification fails. Never leaks which
+    specific check failed to external callers — that detail stays in logs."""
 
 
-class ExpiredTokenError(AuthError):
-    pass
+@dataclass
+class TokenPayload:
+    sub: str
+    tenant_slug: str
+    iss: str
+    exp: int
 
 
-class InvalidTokenError(AuthError):
-    """Bad signature, wrong issuer, or otherwise fails cryptographic/claim
-    validation — as opposed to being merely expired."""
+def _secret() -> str:
+    secret = os.environ.get("JWT_SECRET", "")
+    if not secret:
+        raise RuntimeError("JWT_SECRET env var must be set")
+    return secret
 
 
-class MalformedTokenError(AuthError):
-    """Decodes and validates cryptographically, but is missing/has the
-    wrong shape for required claims."""
-
-
-def _get_secret() -> str:
-    # Read at call time, not at import time — matters for tests that set
-    # JWT_SECRET via monkeypatch/os.environ after this module is imported.
-    return os.environ["JWT_SECRET"]
-
-
-def _get_issuer() -> str:
+def _issuer() -> str:
     return os.environ.get("JWT_ISSUER", "voice-agent-platform")
 
 
-def create_access_token(*, subject: str, tenant_slug: str, ttl_seconds: int = 3600) -> str:
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": subject,
-        "tenant_slug": tenant_slug,
-        "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(seconds=ttl_seconds)).timestamp()),
-        "iss": _get_issuer(),
-    }
-    return jwt.encode(payload, _get_secret(), algorithm="HS256")
+def create_access_token(
+    *, subject: str, tenant_slug: str, expires_in: int = TOKEN_EXPIRY_SECONDS
+) -> str:
+    now = int(time.time())
+    return jwt.encode(
+        {
+            "sub": subject,
+            "tenant_slug": tenant_slug,
+            "iss": _issuer(),
+            "iat": now,
+            "exp": now + expires_in,
+        },
+        _secret(),
+        algorithm="HS256",
+    )
 
 
 def decode_access_token(token: str) -> TokenPayload:
     try:
-        raw = jwt.decode(token, _get_secret(), algorithms=["HS256"], issuer=_get_issuer())
+        data = jwt.decode(
+            token,
+            _secret(),
+            algorithms=["HS256"],
+            issuer=_issuer(),
+            options={"require": ["sub", "exp", "iss"]},
+        )
     except jwt.ExpiredSignatureError as e:
-        raise ExpiredTokenError("token has expired") from e
+        raise AuthError("token expired") from e
+    except jwt.InvalidIssuerError as e:
+        raise AuthError("invalid issuer") from e
     except jwt.InvalidTokenError as e:
-        # Covers bad signature, wrong issuer, malformed JWT structure, etc.
-        # — anything PyJWT itself rejects before we even see claims.
-        raise InvalidTokenError(str(e)) from e
+        raise AuthError(f"invalid token: {e}") from e
 
-    try:
-        return TokenPayload(**raw)
-    except Exception as e:
-        raise MalformedTokenError(f"token claims do not match expected shape: {e}") from e
+    tenant_slug = data.get("tenant_slug", "")
+    if not tenant_slug:
+        raise AuthError("missing tenant_slug claim")
+
+    return TokenPayload(
+        sub=data["sub"],
+        tenant_slug=tenant_slug,
+        iss=data["iss"],
+        exp=data["exp"],
+    )
