@@ -1,6 +1,7 @@
 """
 Builds the STT/TTS pair for the agent session using the official
-`livekit-plugins-sarvam` plugin.
+`livekit-plugins-sarvam` plugin. (The LLM chain lives next door in
+llm_chain.py.)
 
 Why the official plugin, not a hand-rolled port:
 * STT keeps ONE streaming WebSocket open for the whole call (no per-utterance
@@ -49,6 +50,7 @@ def build_tts():
         output_audio_codec="linear16",
         speech_sample_rate=int(_env("SARVAM_TTS_SAMPLE_RATE", "24000")),
         min_buffer_size=int(_env("SARVAM_TTS_MIN_BUFFER", "30")),
+        max_chunk_length=int(_env("SARVAM_TTS_MAX_CHUNK", "150")),
         pace=float(_env("SARVAM_TTS_PACE", "1.05")),
     )
 

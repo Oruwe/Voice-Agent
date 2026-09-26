@@ -21,6 +21,12 @@ doing the lookup in `llm_node` keeps preemptive generation valid.
 TTS/STT: uses the OFFICIAL `livekit-plugins-sarvam` package via
 app/voice_providers/factory.py, which wraps the plugin with env-var-driven
 configuration and TTS prewarming.
+
+Barge-in: `turn_handling["interruption"]["mode"]` is pinned to "vad" (see the
+comment at the AgentSession construction site) so interruption behavior is
+identical in local dev and production, and `min_duration` is lowered from the
+SDK's 0.5s default so the agent stops talking almost as soon as the user
+starts.
 """
 from __future__ import annotations
 
@@ -38,9 +44,9 @@ load_dotenv(override=True)
 
 from livekit import agents, rtc
 from livekit.agents import Agent, AgentSession, JobContext, JobProcess, RunContext, metrics
-from livekit.agents.llm import ChatContext, ChatMessage, FallbackAdapter, function_tool  # type: ignore
+from livekit.agents.llm import ChatContext, ChatMessage, function_tool  # type: ignore
 from livekit.agents.voice.events import ConversationItemAddedEvent
-from livekit.plugins import google, openai, silero  # type: ignore
+from livekit.plugins import silero  # type: ignore
 
 from app.context.moss_memory import MossLiveMemory, RecallResult
 from app.context.moss_provider import MossContextProvider
@@ -55,6 +61,7 @@ from app.db.session_manager import (
     ToolCallRecorder,
     VoiceSessionRecorder,
 )
+from app.latency_log import BargeInTracker, record_turn_metrics
 from app.security.session_boundary import (
     SessionBoundaryError,
     enforce_single_participant,
@@ -62,6 +69,7 @@ from app.security.session_boundary import (
 )
 from app.tools.definitions import build_tool_registry
 from app.voice_providers.factory import build_stt, build_tts, prewarm_tts
+from app.voice_providers.llm_chain import build_llm
 
 logger = logging.getLogger("agent.entrypoint")
 
@@ -357,25 +365,25 @@ async def entrypoint(ctx: JobContext) -> None:
 
     session: AgentSession = AgentSession(
         stt=build_stt(),
-        llm=FallbackAdapter(
-            [
-                openai.LLM(
-                    model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
-                    api_key=os.environ["GROQ_API_KEY"],
-                    base_url="https://api.groq.com/openai/v1",
-                    _strict_tool_schema=False,
-                    temperature=float(os.environ.get("LLM_TEMPERATURE", "0.6")),
-                ),
-                google.LLM(model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")),
-            ],
-            attempt_timeout=float(os.environ.get("LLM_ATTEMPT_TIMEOUT", "4")),
-        ),
+        llm=build_llm(),
         tts=tts,
         vad=ctx.proc.userdata.get("vad") or silero.VAD.load(),
         turn_handling={
             "endpointing": {
-                "min_delay": float(os.environ.get("MIN_ENDPOINTING_DELAY", "0.30")),
+                "min_delay": float(os.environ.get("MIN_ENDPOINTING_DELAY", "0.25")),
                 "max_delay": float(os.environ.get("MAX_ENDPOINTING_DELAY", "2.0")),
+            },
+            "interruption": {
+                # Pinned to "vad" instead of left to auto-detect: the SDK
+                # auto-resolves to the ML-based "adaptive" detector (an extra
+                # network hop to LiveKit's hosted inference) in local dev but
+                # disables it in production unless explicitly requested --
+                # dev and prod would otherwise feel different. "vad" uses the
+                # local Silero VAD we already load, so it's free and identical
+                # in both places.
+                "mode": os.environ.get("INTERRUPTION_MODE", "vad"),
+                "min_duration": float(os.environ.get("MIN_INTERRUPTION_DURATION", "0.3")),
+                "min_words": int(os.environ.get("MIN_INTERRUPTION_WORDS", "0")),
             },
             "preemptive_generation": {"enabled": True, "preemptive_tts": True},
         },
@@ -399,11 +407,17 @@ async def entrypoint(ctx: JobContext) -> None:
         if isinstance(item, ChatMessage) and item.role in ("user", "assistant"):
             await memory.remember(role=item.role, text=item.text_content or "", doc_id=item.id)
 
+    barge_in = BargeInTracker(session_id=session_id)
+
     def _on_item(ev: ConversationItemAddedEvent) -> None:
         asyncio.create_task(_persist_turn(ev))
         asyncio.create_task(_remember_turn(ev))
+        record_turn_metrics(ev.item, session_id=session_id)
+        barge_in.on_item(ev.item)
 
     session.on("conversation_item_added", _on_item)
+    session.on("user_state_changed", lambda ev: barge_in.on_user_state(ev, agent_state=session.agent_state))
+    session.on("agent_state_changed", barge_in.on_agent_state)
 
     usage = metrics.ModelUsageCollector()
 
