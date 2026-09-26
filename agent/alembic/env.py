@@ -4,6 +4,10 @@ import asyncio
 import os
 from logging.config import fileConfig
 
+from dotenv import load_dotenv
+
+load_dotenv()  # load agent/.env so DATABASE_URL is available without shell exports
+
 from alembic import context
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from sqlalchemy.pool import NullPool
