@@ -1,6 +1,6 @@
 """
 Unit tests for the parts of app.agent_entrypoint that don't require a live
-LiveKit room/session: `_record_boundary_failure`, `aiter_db_session`, and
+LiveKit room/session: `_record_boundary_failure`, `_job_executor_type`, and
 `FieldOpsAssistant`'s two function-tool methods. `entrypoint()` itself is
 not exercised here -- it needs a real JobContext/room and is explicitly
 documented (in the module's own docstring) as not run end to end.
@@ -10,7 +10,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.agent_entrypoint import FieldOpsAssistant, _record_boundary_failure, aiter_db_session
+from livekit.agents import JobExecutorType
+
+from app.agent_entrypoint import FieldOpsAssistant, _job_executor_type, _record_boundary_failure
 from app.context.types import ContextBundle
 from app.security.identity import TenantNotFoundError, UserNotFoundError
 from app.security.session_boundary import AuthenticationRejectedError, NoParticipantError
@@ -116,23 +118,25 @@ async def test_boundary_failure_falls_back_to_security_event_when_audit_write_fa
 
 
 # --------------------------------------------------------------------------
-# aiter_db_session
+# _job_executor_type
 # --------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_aiter_db_session_yields_a_single_session():
-    fake_db = MagicMock(name="fake_db_session")
+def test_job_executor_defaults_to_process(monkeypatch):
+    monkeypatch.delenv("JOB_EXECUTOR", raising=False)
+    assert _job_executor_type() is JobExecutorType.PROCESS
 
-    async def fake_get_db():
-        yield fake_db
 
-    with patch("app.db.base.get_db", fake_get_db):
-        gen = aiter_db_session()
-        db = await anext(gen)
-        assert db is fake_db
+def test_job_executor_thread_is_accepted_case_insensitively(monkeypatch):
+    monkeypatch.setenv("JOB_EXECUTOR", " Thread ")
+    assert _job_executor_type() is JobExecutorType.THREAD
 
-        with pytest.raises(StopAsyncIteration):
-            await anext(gen)
+
+def test_job_executor_typo_fails_at_startup_naming_the_variable(monkeypatch):
+    """A typo silently falling back to process mode would bring the memory
+    kills back without anyone noticing."""
+    monkeypatch.setenv("JOB_EXECUTOR", "threads")
+    with pytest.raises(ValueError, match="JOB_EXECUTOR"):
+        _job_executor_type()
 
 
 # --------------------------------------------------------------------------
