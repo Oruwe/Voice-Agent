@@ -36,13 +36,17 @@ def upgrade() -> None:
     turn_role.create(op.get_bind(), checkfirst=True)
     tool_call_status.create(op.get_bind(), checkfirst=True)
 
+    # Columns below reference these types with create_type=False. A bare
+    # sa.Enum(name=...) would re-issue CREATE TYPE from create_table's
+    # before_create hook and fail with DuplicateObjectError on every fresh DB.
+
     # --- tenants ---
     op.create_table(
         "tenants",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column("slug", sa.String(64), nullable=False),
         sa.Column("name", sa.String(255), nullable=False),
-        sa.Column("status", sa.Enum("active", "suspended", name="tenant_status"), nullable=False, server_default="active"),
+        sa.Column("status", postgresql.ENUM("active", "suspended", name="tenant_status", create_type=False), nullable=False, server_default="active"),
         sa.Column("config", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default="{}"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
@@ -56,7 +60,7 @@ def upgrade() -> None:
         sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False),
         sa.Column("external_id", sa.String(255), nullable=False),
         sa.Column("display_name", sa.String(255), nullable=True),
-        sa.Column("status", sa.Enum("active", "disabled", name="user_status"), nullable=False, server_default="active"),
+        sa.Column("status", postgresql.ENUM("active", "disabled", name="user_status", create_type=False), nullable=False, server_default="active"),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
@@ -71,7 +75,7 @@ def upgrade() -> None:
         sa.Column("user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
         sa.Column("current_language", sa.String(8), nullable=False, server_default="en-IN"),
         sa.Column("language_history", sa.Text(), nullable=False, server_default="en-IN"),
-        sa.Column("status", sa.Enum("active", "closed", "error", name="voice_session_status"), nullable=False, server_default="active"),
+        sa.Column("status", postgresql.ENUM("active", "closed", "error", name="voice_session_status", create_type=False), nullable=False, server_default="active"),
         sa.Column("started_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("ended_at", sa.DateTime(timezone=True), nullable=True),
     )
@@ -84,7 +88,7 @@ def upgrade() -> None:
         sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False),
         sa.Column("session_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("voice_sessions.id", ondelete="CASCADE"), nullable=False),
         sa.Column("user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
-        sa.Column("role", sa.Enum("user", "assistant", "system", "tool", name="turn_role"), nullable=False),
+        sa.Column("role", postgresql.ENUM("user", "assistant", "system", "tool", name="turn_role", create_type=False), nullable=False),
         sa.Column("text", sa.Text(), nullable=False),
         sa.Column("language", sa.String(8), nullable=True),
         sa.Column("retrieval_metadata", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default="{}"),
@@ -101,7 +105,7 @@ def upgrade() -> None:
         sa.Column("user_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
         sa.Column("tool_name", sa.String(128), nullable=False),
         sa.Column("arguments", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
-        sa.Column("status", sa.Enum("pending", "succeeded", "failed", "timed_out", "rejected", name="tool_call_status"), nullable=False, server_default="pending"),
+        sa.Column("status", postgresql.ENUM("pending", "succeeded", "failed", "timed_out", "rejected", name="tool_call_status", create_type=False), nullable=False, server_default="pending"),
         sa.Column("call_id", sa.String(64), nullable=False),
         sa.Column("idempotency_key", sa.String(128), nullable=True),
         sa.Column("requested_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
