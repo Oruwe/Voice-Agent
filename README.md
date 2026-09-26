@@ -106,7 +106,7 @@ Two things that have each cost a debugging session:
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-# Windows: python -m venv .venv && .venv\Scripts\activate
+# Windows Git Bash: python -m venv .venv && source .venv/Scripts/activate
 pip install -r requirements.txt -r requirements-dev.txt
 alembic upgrade head
 ```
@@ -216,6 +216,7 @@ LATENCY_LOG_PATH=sarvam.jsonl  LLM_CHAIN=sarvam,groq,gemini
 | Browser connects but there is no audio | `VITE_LIVEKIT_URL` wrong, or the agent worker (terminal 2) is not running |
 | CORS error in the browser console | `ALLOWED_ORIGINS` must match the frontend origin exactly, e.g. `http://localhost:5173` |
 | Agent never responds | check terminal 2 — rate limits, auth failures, and provider fallbacks surface there |
+| `ModuleNotFoundError: No module named 'alembic.config'` | `PYTHONPATH=.` shadows the installed package — don't set it. Run `alembic upgrade head` directly; `alembic.ini` already contains `prepend_sys_path = .` which lets Alembic find `app.*` on its own |
 
 ## Deploying: Vercel (frontend) + Render (backend)
 
