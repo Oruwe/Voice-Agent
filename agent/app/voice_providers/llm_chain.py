@@ -69,14 +69,26 @@ def key_env(name: str) -> str:
     return _REQUIRED_KEY[name]
 
 
-def groq_reasoning_effort() -> str | None:
-    """GROQ_REASONING_EFFORT, or None when unset (the parameter isn't sent).
+# Groq models that take reasoning_effort=low|medium|high. Every other Groq
+# model rejects that value, so it is sent only to these.
+_GROQ_REASONING_PREFIXES = ("openai/gpt-oss",)
+
+
+def groq_reasoning_effort(model: str | None = None) -> str | None:
+    """GROQ_REASONING_EFFORT for `model` (default: the configured Groq model),
+    or None when unset or when the model doesn't reason (then the parameter
+    isn't sent).
 
     gpt-oss models reason before their first answer token, and the voice
-    pipeline waits for that token -- "low" keeps the wait short. Leave it
-    unset for a model that doesn't reason; Groq rejects the parameter there.
+    pipeline waits for that token -- "low" keeps the wait short. A model that
+    doesn't reason skips the wait entirely, which is why it can be switched to
+    with GROQ_MODEL alone, without also clearing this variable.
     """
-    return os.environ.get("GROQ_REASONING_EFFORT", "").strip() or None
+    effort = os.environ.get("GROQ_REASONING_EFFORT", "").strip() or None
+    model = model or model_for("groq")
+    if effort and model.startswith(_GROQ_REASONING_PREFIXES):
+        return effort
+    return None
 
 
 def _temperature() -> float:
