@@ -162,9 +162,13 @@ python preflight_check.py
 ```
 
 It makes one lightweight, authenticated call per service (Postgres, LiveKit
-Cloud, Sarvam, Moss) and checks `GOOGLE_API_KEY` is set, and tells you in
-~10 seconds which of the five is actually going to work before you spend
-time debugging a live session. Nothing is created or left running.
+Cloud, Sarvam, Moss), plus a 1-token completion against every provider in
+`LLM_CHAIN` using the exact model the worker will call. It tells you in
+about 10 seconds which services will actually work before you spend time
+debugging a live session. A retired model is reported separately from a
+rejected key, because `FallbackAdapter` would otherwise quietly route around
+either one. Nothing is created or left running. The deployed worker runs it
+on every boot, so its results are the first lines of the worker's logs.
 
 ## Measuring latency
 

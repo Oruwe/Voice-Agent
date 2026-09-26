@@ -39,6 +39,34 @@ _REQUIRED_KEY = {
 }
 
 
+# Env var naming each provider's model, and the model used when it's unset.
+# preflight_check.py reads this same table, so the model it verifies at boot is
+# exactly the one the worker will call.
+_MODEL = {
+    "groq": ("GROQ_MODEL", "llama-3.3-70b-versatile"),
+    # gemini-2.0/2.5 models refuse new API keys ("no longer available to new
+    # users", checked 2026-09-26); 3.5-flash-lite is Google's named successor.
+    "gemini": ("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+    "sarvam": ("SARVAM_LLM_MODEL", "sarvam-105b-conversations"),
+}
+
+
+def model_for(name: str) -> str:
+    """The model the agent will call for provider `name`."""
+    env, default = _MODEL[name]
+    return os.environ.get(env, default)
+
+
+def model_env(name: str) -> str:
+    """The env var that selects provider `name`'s model."""
+    return _MODEL[name][0]
+
+
+def key_env(name: str) -> str:
+    """The env var holding provider `name`'s API key."""
+    return _REQUIRED_KEY[name]
+
+
 def _temperature() -> float:
     return float(os.environ.get("LLM_TEMPERATURE", "0.6"))
 
@@ -47,7 +75,7 @@ def _build_groq():
     from livekit.plugins import openai
 
     return openai.LLM(
-        model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        model=model_for("groq"),
         api_key=os.environ["GROQ_API_KEY"],
         base_url="https://api.groq.com/openai/v1",
         _strict_tool_schema=False,
@@ -58,7 +86,7 @@ def _build_groq():
 def _build_gemini():
     from livekit.plugins import google
 
-    return google.LLM(model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"))
+    return google.LLM(model=model_for("gemini"))
 
 
 def _build_sarvam():
@@ -67,7 +95,7 @@ def _build_sarvam():
     return sarvam.LLM(
         # "-conversations" is the multi-turn optimized variant, which is what
         # a voice agent actually is.
-        model=os.environ.get("SARVAM_LLM_MODEL", "sarvam-105b-conversations"),
+        model=model_for("sarvam"),
         api_key=os.environ["SARVAM_API_KEY"],
         temperature=_temperature(),
     )
