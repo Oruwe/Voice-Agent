@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
-from app.latency_log import record_turn_metrics
+from app.latency_log import BargeInTracker, record_turn_metrics
 
 # latency_report.py is a top-level operator script (sibling of
 # preflight_check.py), not part of the `app` package, so it is loaded by path.
@@ -271,6 +271,158 @@ def test_recorder_tolerates_item_without_metrics(tmp_path):
     with patch.dict(os.environ, {"LATENCY_LOG_PATH": str(path)}):
         record_turn_metrics(SimpleNamespace(role="user", id="x"), session_id="s")
     assert not path.exists()
+
+
+# --------------------------------------------------------------------------
+# BargeInTracker
+#
+# Pure state machine driven by three callbacks, so it tests fully offline.
+# Real barge-in still needs a live mic -- see the module docstring.
+# --------------------------------------------------------------------------
+
+def _user_state(new_state, at):
+    return SimpleNamespace(new_state=new_state, created_at=at)
+
+
+def _agent_state(old_state, new_state, at):
+    return SimpleNamespace(old_state=old_state, new_state=new_state, created_at=at)
+
+
+def _interrupted_reply(interrupted=True):
+    return SimpleNamespace(role="assistant", interrupted=interrupted, id="i1")
+
+
+def _rows(path):
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def test_barge_in_happy_path_records_the_delta(tmp_path):
+    path = tmp_path / "run.jsonl"
+    tracker = BargeInTracker(session_id="room-1")
+    with patch.dict(os.environ, {"LATENCY_LOG_PATH": str(path)}):
+        tracker.on_user_state(_user_state("speaking", 100.0), agent_state="speaking")
+        tracker.on_item(_interrupted_reply())
+        tracker.on_agent_state(_agent_state("speaking", "listening", 100.3))
+
+    rows = _rows(path)
+    assert len(rows) == 1
+    assert rows[0]["barge_in_latency"] == pytest.approx(0.3)
+    assert rows[0]["session_id"] == "room-1"
+
+
+def test_no_row_when_agent_finished_naturally(tmp_path):
+    """User talked over it, but the reply was never actually interrupted."""
+    path = tmp_path / "run.jsonl"
+    tracker = BargeInTracker(session_id="s")
+    with patch.dict(os.environ, {"LATENCY_LOG_PATH": str(path)}):
+        tracker.on_user_state(_user_state("speaking", 100.0), agent_state="speaking")
+        tracker.on_item(_interrupted_reply(interrupted=False))
+        tracker.on_agent_state(_agent_state("speaking", "listening", 100.3))
+    assert _rows(path) == []
+
+
+def test_no_row_when_agent_stops_with_no_onset(tmp_path):
+    path = tmp_path / "run.jsonl"
+    tracker = BargeInTracker(session_id="s")
+    with patch.dict(os.environ, {"LATENCY_LOG_PATH": str(path)}):
+        tracker.on_item(_interrupted_reply())
+        tracker.on_agent_state(_agent_state("speaking", "listening", 100.3))
+    assert _rows(path) == []
+
+
+def test_user_speaking_while_agent_idle_is_not_an_onset(tmp_path):
+    """Normal turn-taking: the user speaking is not a barge-in."""
+    path = tmp_path / "run.jsonl"
+    tracker = BargeInTracker(session_id="s")
+    with patch.dict(os.environ, {"LATENCY_LOG_PATH": str(path)}):
+        tracker.on_user_state(_user_state("speaking", 100.0), agent_state="listening")
+        tracker.on_item(_interrupted_reply())
+        tracker.on_agent_state(_agent_state("speaking", "listening", 100.3))
+    assert _rows(path) == []
+
+
+def test_onset_does_not_leak_into_a_later_turn(tmp_path):
+    """An overlap that didn't stop the agent must not arm the next measurement."""
+    path = tmp_path / "run.jsonl"
+    tracker = BargeInTracker(session_id="s")
+    with patch.dict(os.environ, {"LATENCY_LOG_PATH": str(path)}):
+        # turn 1: user overlaps, agent finishes anyway
+        tracker.on_user_state(_user_state("speaking", 100.0), agent_state="speaking")
+        tracker.on_item(_interrupted_reply(interrupted=False))
+        tracker.on_agent_state(_agent_state("speaking", "listening", 100.5))
+        # turn 2: agent interrupted, but no fresh onset was recorded
+        tracker.on_item(_interrupted_reply())
+        tracker.on_agent_state(_agent_state("speaking", "listening", 130.0))
+    assert _rows(path) == []
+
+
+def test_stale_onset_is_discarded(tmp_path):
+    path = tmp_path / "run.jsonl"
+    tracker = BargeInTracker(session_id="s")
+    with patch.dict(os.environ, {"LATENCY_LOG_PATH": str(path)}):
+        tracker.on_user_state(_user_state("speaking", 100.0), agent_state="speaking")
+        tracker.on_item(_interrupted_reply())
+        tracker.on_agent_state(_agent_state("speaking", "listening", 100.0 + 60))
+    assert _rows(path) == []
+
+
+def test_agent_state_change_not_leaving_speaking_is_ignored(tmp_path):
+    path = tmp_path / "run.jsonl"
+    tracker = BargeInTracker(session_id="s")
+    with patch.dict(os.environ, {"LATENCY_LOG_PATH": str(path)}):
+        tracker.on_user_state(_user_state("speaking", 100.0), agent_state="speaking")
+        tracker.on_item(_interrupted_reply())
+        tracker.on_agent_state(_agent_state("listening", "thinking", 100.2))
+    assert _rows(path) == []
+
+
+def test_two_successive_barge_ins_each_record(tmp_path):
+    path = tmp_path / "run.jsonl"
+    tracker = BargeInTracker(session_id="s")
+    with patch.dict(os.environ, {"LATENCY_LOG_PATH": str(path)}):
+        for start, stop in ((100.0, 100.3), (200.0, 200.25)):
+            tracker.on_user_state(_user_state("speaking", start), agent_state="speaking")
+            tracker.on_item(_interrupted_reply())
+            tracker.on_agent_state(_agent_state("speaking", "listening", stop))
+
+    values = [r["barge_in_latency"] for r in _rows(path)]
+    assert values == pytest.approx([0.3, 0.25])
+
+
+def test_barge_in_tracker_is_inert_when_env_unset(tmp_path):
+    tracker = BargeInTracker(session_id="s")
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("LATENCY_LOG_PATH", None)
+        tracker.on_user_state(_user_state("speaking", 100.0), agent_state="speaking")
+        tracker.on_item(_interrupted_reply())
+        tracker.on_agent_state(_agent_state("speaking", "listening", 100.3))
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_barge_in_rows_flow_through_the_report(tmp_path):
+    path = tmp_path / "run.jsonl"
+    tracker = BargeInTracker(session_id="s")
+    with patch.dict(os.environ, {"LATENCY_LOG_PATH": str(path)}):
+        for i in range(3):
+            tracker.on_user_state(_user_state("speaking", 100.0 * i), agent_state="speaking")
+            tracker.on_item(_interrupted_reply())
+            tracker.on_agent_state(_agent_state("speaking", "listening", 100.0 * i + 0.3))
+
+    series, _, _ = latency_report.load(str(path))
+    assert series["barge_in_latency"] == pytest.approx([0.3, 0.3, 0.3])
+    assert "Barge-in stop" in latency_report.single_report(str(path), markdown=False)
+
+
+def test_turn_rows_carry_the_interrupted_flag(tmp_path):
+    path = tmp_path / "run.jsonl"
+    item = SimpleNamespace(
+        metrics={"e2e_latency": 0.5}, role="assistant", id="i1", interrupted=True
+    )
+    with patch.dict(os.environ, {"LATENCY_LOG_PATH": str(path)}):
+        record_turn_metrics(item, session_id="s")
+    assert json.loads(path.read_text(encoding="utf-8"))["interrupted"] is True
 
 
 # --------------------------------------------------------------------------

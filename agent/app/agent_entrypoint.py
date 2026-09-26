@@ -61,7 +61,7 @@ from app.db.session_manager import (
     ToolCallRecorder,
     VoiceSessionRecorder,
 )
-from app.latency_log import record_turn_metrics
+from app.latency_log import BargeInTracker, record_turn_metrics
 from app.security.session_boundary import (
     SessionBoundaryError,
     enforce_single_participant,
@@ -418,12 +418,17 @@ async def entrypoint(ctx: JobContext) -> None:
         if isinstance(item, ChatMessage) and item.role in ("user", "assistant"):
             await memory.remember(role=item.role, text=item.text_content or "", doc_id=item.id)
 
+    barge_in = BargeInTracker(session_id=session_id)
+
     def _on_item(ev: ConversationItemAddedEvent) -> None:
         asyncio.create_task(_persist_turn(ev))
         asyncio.create_task(_remember_turn(ev))
         record_turn_metrics(ev.item, session_id=session_id)
+        barge_in.on_item(ev.item)
 
     session.on("conversation_item_added", _on_item)
+    session.on("user_state_changed", lambda ev: barge_in.on_user_state(ev, agent_state=session.agent_state))
+    session.on("agent_state_changed", barge_in.on_agent_state)
 
     usage = metrics.ModelUsageCollector()
 

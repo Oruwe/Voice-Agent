@@ -32,6 +32,7 @@ import sys
 # Display order and labels. Keys match MetricsReport / latency_log.py.
 METRICS: tuple[tuple[str, str], ...] = (
     ("e2e_latency", "End-to-end (stopped speaking -> agent speaks)"),
+    ("barge_in_latency", "Barge-in stop (user speaks -> agent stops)"),
     ("end_of_turn_delay", "Turn-end decision (endpointing)"),
     ("transcription_delay", "STT transcript after speech"),
     ("llm_node_ttft", "LLM first token (incl. Moss recall)"),
