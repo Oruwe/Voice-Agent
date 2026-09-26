@@ -74,3 +74,30 @@ export async function fetchLiveKitToken(
 }
 
 export const LIVEKIT_URL = import.meta.env.VITE_LIVEKIT_URL ?? "";
+
+export interface UploadDocumentResponse {
+  document_id: string;
+  chunks: number;
+  status: string;
+}
+
+export async function uploadDocument(
+  accessToken: string,
+  file: File,
+): Promise<UploadDocumentResponse> {
+  const form = new FormData();
+  form.append("file", file);
+
+  const response = await fetch(`${API_BASE_URL}/v1/documents/upload`, {
+    method: "POST",
+    // No Content-Type header — browser sets multipart/form-data + boundary automatically.
+    headers: { Authorization: `Bearer ${accessToken}` },
+    body: form,
+  });
+
+  if (!response.ok) {
+    throw new ApiRequestError(response.status, await parseErrorDetail(response));
+  }
+
+  return (await response.json()) as UploadDocumentResponse;
+}

@@ -32,6 +32,12 @@ class MossContextProvider:
         self._client = MossClient(project_id, project_key)
         self._loaded_indexes: set[str] = set()
 
+    @property
+    def client(self) -> MossClient:
+        """Expose the underlying client for callers that need to query Moss
+        directly, e.g. `MossLiveMemory`'s inline session/knowledge queries."""
+        return self._client
+
     @staticmethod
     def _index_name(tenant_id: str, logical_name: str) -> str:
         """Derive the tenant-scoped Moss index name."""

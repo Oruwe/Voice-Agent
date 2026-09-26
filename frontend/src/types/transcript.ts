@@ -37,3 +37,18 @@ export interface ToolEvent {
 }
 
 export type AgentState = "idle" | "initializing" | "listening" | "thinking" | "speaking";
+
+export interface TurnLatency {
+  id: string;
+  userText: string;
+  agentText?: string;
+  /** user final transcript -> agent speaking (perceived latency) */
+  totalMs?: number;
+  /** user final -> agent thinking (endpointing delay) */
+  eouMs?: number;
+  /** agent thinking -> speaking (LLM+TTS time) */
+  thinkMs?: number;
+  /** Moss search time (from data channel event) */
+  mossMs?: number;
+  mossHits?: number;
+}

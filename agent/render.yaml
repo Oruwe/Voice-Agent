@@ -41,3 +41,15 @@ services:
 
       - key: ALLOWED_ORIGINS
         sync: false
+
+      - key: MOSS_PROJECT_ID
+        sync: false
+
+      - key: MOSS_PROJECT_KEY
+        sync: false
+
+      - key: QDRANT_URL
+        sync: false
+
+      - key: QDRANT_API_KEY
+        sync: false
