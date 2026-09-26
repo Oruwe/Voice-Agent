@@ -21,7 +21,6 @@ the two differ.
 agent/       FastAPI token service + LiveKit Agents worker (Python)
 frontend/    React + TypeScript + Vite console (livekit-client)
 docs/adr/    Architecture decision records
-render.yaml  Render Blueprint for the backend (see agent/render.yaml)
 ```
 
 ## Verified state
@@ -32,13 +31,12 @@ render.yaml  Render Blueprint for the backend (see agent/render.yaml)
   (`agent_entrypoint.py`, `context/embeddings.py`,
   `context/moss_provider.py`, `context/qdrant_provider.py`,
   `tools/definitions.py`) now have dedicated tests.
-- **Backend, since then**: the latency-benchmark and LLM-chain work added
-  `tests/test_latency_report.py` and `tests/test_llm_chain.py`. 120 tests
-  pass without a database (`pytest --ignore=tests/test_auth_identity.py`);
-  the DB-backed tests need `DATABASE_URL` and have not been re-run against
-  a real Postgres since, so the combined figure above is not current.
-  `tests/test_auth_identity.py` additionally fails to import on an
-  unrelated pre-existing `ExpiredTokenError` symbol.
+- **Backend, current**: 198 tests pass against a real PostgreSQL
+  (`pytest --ignore=tests/test_auth_identity.py` with `DATABASE_URL` set).
+  149 of them run without a database. Migration `0001` passes upgrade →
+  downgrade → upgrade against the same server. `tests/test_auth_identity.py`
+  fails to import because of an unrelated, pre-existing `ExpiredTokenError`
+  symbol.
 - **Frontend**: `npm run lint` and `npm run build` both clean. No automated
   test suite exists yet (no vitest/jest configured).
 - **End-to-end locally**: both services started together, real
@@ -106,7 +104,7 @@ Two things that have each cost a debugging session:
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-# Windows: python -m venv .venv && .venv\Scripts\activate
+# Windows Git Bash: python -m venv .venv && source .venv/Scripts/activate
 pip install -r requirements.txt -r requirements-dev.txt
 alembic upgrade head
 ```
@@ -162,9 +160,13 @@ python preflight_check.py
 ```
 
 It makes one lightweight, authenticated call per service (Postgres, LiveKit
-Cloud, Sarvam, Moss) and checks `GOOGLE_API_KEY` is set, and tells you in
-~10 seconds which of the five is actually going to work before you spend
-time debugging a live session. Nothing is created or left running.
+Cloud, Sarvam, Moss), plus a 1-token completion against every provider in
+`LLM_CHAIN` using the exact model the worker will call. It tells you in
+about 10 seconds which services will actually work before you spend time
+debugging a live session. A retired model is reported separately from a
+rejected key, because `FallbackAdapter` would otherwise quietly route around
+either one. Nothing is created or left running. The deployed worker runs it
+on every boot, so its results are the first lines of the worker's logs.
 
 ## Measuring latency
 
@@ -188,6 +190,10 @@ inline Moss recall, since Moss runs inside `llm_node`), TTS first byte.
 Recording is **off unless `LATENCY_LOG_PATH` is set** — nothing is opened
 or written otherwise — and `app/latency_log.py` writes timings only, never
 transcript text.
+
+On a deployed worker, set `LATENCY_LOG_PATH=stdout`. Rows go to the worker's
+logs prefixed `LATENCY_ROW`, and `latency_report.py` reads a log export
+directly: it picks out the marked rows and skips every other line.
 
 What makes a comparison real rather than noise:
 
@@ -216,19 +222,59 @@ LATENCY_LOG_PATH=sarvam.jsonl  LLM_CHAIN=sarvam,groq,gemini
 | Browser connects but there is no audio | `VITE_LIVEKIT_URL` wrong, or the agent worker (terminal 2) is not running |
 | CORS error in the browser console | `ALLOWED_ORIGINS` must match the frontend origin exactly, e.g. `http://localhost:5173` |
 | Agent never responds | check terminal 2 — rate limits, auth failures, and provider fallbacks surface there |
+| `ModuleNotFoundError: No module named 'alembic.config'` | `PYTHONPATH=.` shadows the installed package — don't set it. Run `alembic upgrade head` directly; `alembic.ini` already contains `prepend_sys_path = .` which lets Alembic find `app.*` on its own |
 
-## Deploying: Vercel (frontend) + Render (backend)
+## Deploying: Railway (backend, Singapore) + Vercel (frontend)
 
-- `agent/render.yaml` — Blueprint defining the token service (web) and
-  agent worker (background worker) as two Render services. Every secret is
-  `sync: false`; fill real values in Render's dashboard, not in the file.
-- Frontend: Vercel auto-detects Vite. Set **Root Directory** to `frontend`
-  (the one non-default setting for this monorepo), and set
-  `VITE_API_BASE_URL` / `VITE_LIVEKIT_URL` as environment variables.
-- Full walkthrough, including two real bugs found and fixed while checking
-  an actual `.env` against this code (a bad `DATABASE_URL` format for
-  asyncpg, and a missing `GOOGLE_API_KEY`), is in
-  `docs/voice-agent-platform-local-start-and-deployment.pdf`.
+| Part | Where | Settings |
+| --- | --- | --- |
+| Agent worker | Railway service `agent-worker` | root `agent`; start `sh -c 'python preflight_check.py; exec python -m app.agent_entrypoint start'`; restart always; no public domain |
+| Token API | Railway service `api`, same project | root `agent`; start `sh -c 'alembic upgrade head && exec uvicorn app.security.token_service:app --host 0.0.0.0 --port $PORT'`; healthcheck `/docs`; public domain |
+| Postgres | Railway Postgres template, same project | reached over Railway's private network |
+| Frontend | Vercel | root `frontend`, Vite preset |
+
+Why this split:
+
+- **Region is the biggest latency lever.** STT, TTS and optionally the LLM
+  are Sarvam, which runs in India, and LiveKit has an India edge. Singapore
+  (`sin`) is the closest Railway region. New Railway services default to US
+  West, so set each service's region *before* its first deploy. Moving a
+  service that has a volume means migrating the volume.
+- **The worker has to be always on, with real CPU.** It holds an outbound
+  connection to LiveKit and runs VAD on every 30 ms audio frame. Serverless
+  hosts (Vercel) can't run it. Render's free tier sleeps after 15 minutes
+  and caps CPU at 0.1.
+- **The API stays always on** so a first Connect doesn't wait on a cold
+  start.
+
+Variables:
+
+- `DATABASE_URL` for both services, built from the Postgres service's
+  variables with the asyncpg scheme:
+  `postgresql+asyncpg://${{Postgres.PGUSER}}:${{Postgres.PGPASSWORD}}@${{Postgres.PGHOST}}:${{Postgres.PGPORT}}/${{Postgres.PGDATABASE}}`
+- Worker: `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`,
+  `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY`, `SARVAM_API_KEY`, one key per
+  provider in `LLM_CHAIN`, and `LATENCY_LOG_PATH=stdout`.
+- API: `JWT_SECRET`, `JWT_ISSUER`, `ENVIRONMENT=development` (the frontend
+  gets its token from `/v1/dev/token`), `LIVEKIT_API_KEY`,
+  `LIVEKIT_API_SECRET`, `MOSS_PROJECT_ID`, `MOSS_PROJECT_KEY`, and
+  `ALLOWED_ORIGINS` set to the Vercel production URL exactly.
+- Vercel: `VITE_API_BASE_URL` (the API's public URL) and `VITE_LIVEKIT_URL`.
+  Share the production domain: per-deployment URLs sit behind Vercel's login
+  by default.
+
+Checking a deploy:
+
+- The worker's first log lines are the preflight results. Every line should
+  read `AUTHENTICATED`, including each LLM, before you trust a session.
+- To measure a production run, export the worker's logs and run
+  `python latency_report.py <export>`.
+- Don't run a local worker against the same LiveKit project while testing
+  the deployment. LiveKit splits sessions across every registered worker,
+  so some turns would be measured on your laptop.
+
+`docs/voice-agent-platform-local-start-and-deployment.pdf` describes the
+earlier Render plan, and the two `.env` bugs found while checking it.
 
 ## Known limitations
 

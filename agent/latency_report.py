@@ -21,7 +21,9 @@ Usage:
     python latency_report.py a.jsonl b.jsonl --markdown
 
 To produce a run: set LATENCY_LOG_PATH, start the agent, have a real
-conversation, then point this at the file.
+conversation, then point this at the file. On a deployed worker, set
+LATENCY_LOG_PATH=stdout and point this at an export of the worker's logs:
+rows are found by their marker, and every other log line is skipped.
 """
 from __future__ import annotations
 
@@ -50,6 +52,11 @@ RATE_METRICS: tuple[tuple[str, str], ...] = (
 # Below this, the tail percentiles are noise rather than signal.
 THIN_SAMPLE = 20
 
+# Prefix app/latency_log.py puts on rows printed with LATENCY_LOG_PATH=stdout.
+# Duplicated rather than imported so this script stays stdlib-only; a test
+# asserts the two copies match.
+STDOUT_MARKER = "LATENCY_ROW "
+
 
 def percentile(values: list[float], pct: float) -> float:
     """Nearest-rank percentile.
@@ -74,6 +81,11 @@ def load(path: str) -> tuple[dict[str, list[float]], int, int]:
             line = line.strip()
             if not line:
                 continue
+            # A log export puts timestamps and levels before the marker; the
+            # JSON row is everything after it.
+            marker = line.find(STDOUT_MARKER)
+            if marker != -1:
+                line = line[marker + len(STDOUT_MARKER):]
             try:
                 row = json.loads(line)
             except json.JSONDecodeError:

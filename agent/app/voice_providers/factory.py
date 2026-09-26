@@ -39,14 +39,25 @@ def build_stt():
     )
 
 
+def tts_voice() -> tuple[str, str, str]:
+    """(model, speaker, language) the agent speaks with. preflight_check.py
+    verifies exactly this voice, so the two can't drift apart."""
+    return (
+        _env("SARVAM_TTS_MODEL", "bulbul:v3"),
+        _env("SARVAM_TTS_SPEAKER", "shubh"),
+        _env("SARVAM_TTS_LANGUAGE", "en-IN"),
+    )
+
+
 def build_tts():
     from livekit.plugins import sarvam
 
+    model, speaker, language = tts_voice()
     return sarvam.TTS(
         api_key=os.environ["SARVAM_API_KEY"],
-        target_language_code=_env("SARVAM_TTS_LANGUAGE", "en-IN"),
-        model=_env("SARVAM_TTS_MODEL", "bulbul:v3"),
-        speaker=_env("SARVAM_TTS_SPEAKER", "shubh"),
+        target_language_code=language,
+        model=model,
+        speaker=speaker,
         output_audio_codec="linear16",
         speech_sample_rate=int(_env("SARVAM_TTS_SAMPLE_RATE", "24000")),
         min_buffer_size=int(_env("SARVAM_TTS_MIN_BUFFER", "30")),

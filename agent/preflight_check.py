@@ -24,6 +24,14 @@ uses, the same DATABASE_URL the app's SQLAlchemy engine uses, the same Moss
 SDK app/context/moss_provider.py uses. No LiveKit room is left running, no
 data is written anywhere, nothing is deleted.
 
+For the LLM it sends a 1-token completion to every provider in LLM_CHAIN,
+using the model the worker will actually call (llm_chain.model_for). A
+retired model or a rejected key is otherwise invisible until a live call:
+FallbackAdapter quietly routes around the broken provider.
+
+On the deployed worker it runs at every boot, ahead of the agent, so these
+results are the first thing in the worker's logs.
+
 WHAT IT NEVER DOES: print an API key, secret, JWT, or database password.
 Every credential is masked to its first 4 and last 2 characters.
 
@@ -42,12 +50,15 @@ import sys
 import urllib.parse
 from typing import NamedTuple
 
-REQUIRED_VARS = [
-    "DATABASE_URL", "JWT_SECRET", "JWT_ISSUER", "ENVIRONMENT",
-    "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET",
+from app.voice_providers import llm_chain
+
+# Read by the agent worker. The LLM keys are added per LLM_CHAIN at runtime.
+WORKER_VARS = [
+    "DATABASE_URL", "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET",
     "MOSS_PROJECT_ID", "MOSS_PROJECT_KEY", "SARVAM_API_KEY",
-    "QDRANT_LOCATION", "GEMINI_MODEL", "GOOGLE_API_KEY",
 ]
+# Read only by the token service -- MISSING is expected on a worker-only host.
+TOKEN_SERVICE_VARS = ["JWT_SECRET", "JWT_ISSUER", "ENVIRONMENT"]
 
 
 class CheckResult(NamedTuple):
@@ -184,9 +195,18 @@ async def check_livekit() -> CheckResult:
         await lk.aclose()
 
 
+def sarvam_tts_payload() -> dict:
+    """The REST request livekit-plugins-sarvam sends, for the voice the agent
+    speaks with (factory.tts_voice -- the same function build_tts uses)."""
+    from app.voice_providers.factory import tts_voice
+
+    model, speaker, language = tts_voice()
+    return {"text": "preflight check", "target_language_code": language, "speaker": speaker, "model": model}
+
+
 async def check_sarvam_tts() -> CheckResult:
-    """Same endpoint, same request shape, same default model/speaker/language
-    as app/voice_providers/sarvam/tts.py's TTS class actually sends."""
+    """Same endpoint and request shape as the Sarvam plugin, with the agent's
+    own model, speaker and language -- a retired voice fails here, not mid-call."""
     key = os.environ.get("SARVAM_API_KEY")
     if not key:
         return CheckResult("MISSING", "SARVAM_API_KEY not set")
@@ -200,23 +220,22 @@ async def check_sarvam_tts() -> CheckResult:
     except ImportError:
         return CheckResult("ERROR", "aiohttp not installed (pip install aiohttp)")
 
+    payload = sarvam_tts_payload()
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 "https://api.sarvam.ai/text-to-speech",
                 headers={"api-subscription-key": key, "Content-Type": "application/json"},
-                json={
-                    "inputs": ["preflight check"],
-                    "target_language_code": "en-IN",
-                    "speaker": "anushka",
-                    "model": "bulbul:v2",
-                },
+                json=payload,
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.headers.get("x-deny-reason") == "host_not_allowed":
                     return CheckResult("NETWORK BLOCKED", "egress proxy blocked api.sarvam.ai (host_not_allowed)")
                 if resp.status == 200:
-                    return CheckResult("AUTHENTICATED", "POST /text-to-speech -> 200 OK, audio returned")
+                    return CheckResult(
+                        "AUTHENTICATED",
+                        f"POST /text-to-speech -> 200 OK ({payload['model']}, speaker {payload['speaker']})",
+                    )
                 if resp.status in (401, 403):
                     return CheckResult("REJECTED", f"HTTP {resp.status} -- key rejected by Sarvam")
                 body = (await resp.text())[:150]
@@ -255,42 +274,169 @@ async def check_moss() -> CheckResult:
         return CheckResult("ERROR", f"{type(e).__name__}: {e}")
 
 
-async def check_google() -> CheckResult:
-    key = os.environ.get("GOOGLE_API_KEY")
-    if not key:
-        return CheckResult(
-            "MISSING",
-            "GOOGLE_API_KEY not set -- required by livekit-plugins-google's LLM class (confirmed by "
-            "reading its source: falls back to this env var when no api_key is passed, and raises if "
-            "unset). Get one from Google AI Studio.",
+def llm_request(provider: str, model: str, key: str) -> tuple[str, str, dict, dict]:
+    """(host, url, headers, json) for a 1-token completion, matching how the
+    agent's own clients call each provider. Keys go in headers, never the URL,
+    so an exception message can't carry one into the logs."""
+    ping = [{"role": "user", "content": "ping"}]
+    if provider == "groq":
+        body = {"model": model, "messages": ping, "max_completion_tokens": 16}
+        effort = llm_chain.groq_reasoning_effort()
+        if effort:
+            # Sent exactly as the worker sends it: Groq rejects the parameter
+            # for models that don't reason, and that should fail here.
+            body["reasoning_effort"] = effort
+        return (
+            "api.groq.com",
+            "https://api.groq.com/openai/v1/chat/completions",
+            {"Authorization": f"Bearer {key}"},
+            body,
         )
+    if provider == "gemini":
+        return (
+            "generativelanguage.googleapis.com",
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            {"x-goog-api-key": key},
+            {"contents": [{"parts": [{"text": "ping"}]}], "generationConfig": {"maxOutputTokens": 16}},
+        )
+    if provider == "sarvam":
+        # livekit-plugins-sarvam serves sarvam-105b-conversations from /v1 and
+        # every other model from /v2 (llm/client.py::_resolve_base_url).
+        version = "v1" if model == "sarvam-105b-conversations" else "v2"
+        return (
+            "api.sarvam.ai",
+            f"https://api.sarvam.ai/{version}/chat/completions",
+            {"api-subscription-key": key},
+            {"model": model, "messages": ping, "max_tokens": 16},
+        )
+    raise ValueError(f"no preflight request for LLM provider {provider!r}")
 
-    blocked = await egress_probe("generativelanguage.googleapis.com")
-    if blocked:
-        return blocked
 
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+_BAD_KEY_MARKERS = ("invalid_api_key", "invalid api key", "api key not valid", "api_key_invalid")
+_BAD_MODEL_MARKERS = (
+    "model_not_found", "model_decommissioned", "decommissioned", "does not exist",
+    "is not found", "not supported for generatecontent", "invalid model", "unsupported model",
+)
+
+
+def classify_llm_response(provider: str, model: str, status: int, body: str) -> CheckResult:
+    """Turn a provider's reply into a verdict that names the fix: a rejected
+    key and an unavailable model look alike from the agent (the provider just
+    fails) but need different changes."""
+    lowered = body.lower()
+    if status == 200:
+        return CheckResult("AUTHENTICATED", f"{model} answered a 1-token completion")
+    if status in (401, 403) or any(m in lowered for m in _BAD_KEY_MARKERS):
+        return CheckResult(
+            "REJECTED", f"HTTP {status} -- {provider} rejected {llm_chain.key_env(provider)}"
+        )
+    if status == 404 or any(m in lowered for m in _BAD_MODEL_MARKERS):
+        return CheckResult(
+            "REJECTED",
+            f"HTTP {status} -- model {model!r} is not available on {provider}; set "
+            f"{llm_chain.model_env(provider)} to a current model. {body[:150]}",
+        )
+    if status == 429:
+        return CheckResult(
+            "ERROR",
+            f"HTTP 429 -- the key works but {provider} is rate-limiting it right now; "
+            f"FallbackAdapter will route around {provider} until it recovers",
+        )
+    return CheckResult("ERROR", f"HTTP {status}: {body[:150]}")
+
+
+async def _get_json(url: str, headers: dict) -> tuple[int, str]:
+    import aiohttp
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            return resp.status, await resp.text()
+
+
+async def available_models(provider: str, key: str, *, get=None) -> list[str] | None:
+    """Chat-capable model IDs this key can use, or None if the provider has no
+    listing endpoint or the listing fails. Turns "model X is gone" into
+    "use one of these"."""
+    import json
+
+    get = get or _get_json
     try:
-        import aiohttp
-    except ImportError:
-        return CheckResult("ERROR", "aiohttp not installed (pip install aiohttp)")
+        if provider == "groq":
+            status, body = await get("https://api.groq.com/openai/v1/models", {"Authorization": f"Bearer {key}"})
+            if status != 200:
+                return None
+            skip = ("whisper", "tts", "guard", "orpheus", "distil")
+            return sorted(m["id"] for m in json.loads(body).get("data", []) if not any(s in m["id"] for s in skip))
+        if provider == "gemini":
+            status, body = await get(
+                "https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", {"x-goog-api-key": key}
+            )
+            if status != 200:
+                return None
+            return sorted(
+                m["name"].removeprefix("models/") for m in json.loads(body).get("models", [])
+                if "generateContent" in m.get("supportedGenerationMethods", [])
+            )
+    except Exception:
+        return None
+    return None
+
+
+async def _post_json(url: str, headers: dict, payload: dict) -> tuple[int, str]:
+    import aiohttp
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=15)
+        ) as resp:
+            if resp.headers.get("x-deny-reason") == "host_not_allowed":
+                return -1, "host_not_allowed"
+            return resp.status, await resp.text()
+
+
+async def check_llm(provider: str, *, post=None, get=None) -> CheckResult:
+    """One tiny completion against `provider` with the model the worker will
+    call. `post`/`get` are injectable for tests; they default to aiohttp."""
+    key = os.environ.get(llm_chain.key_env(provider), "").strip()
+    if not key:
+        return CheckResult("MISSING", f"{llm_chain.key_env(provider)} not set")
+
+    model = llm_chain.model_for(provider)
+    host, url, headers, payload = llm_request(provider, model, key)
+
+    # Listing follows the transport: real network in real use, stubbed with post in tests.
+    can_list = post is None or get is not None
+    if post is None:
+        blocked = await egress_probe(host)
+        if blocked:
+            return blocked
+        try:
+            import aiohttp  # noqa: F401
+        except ImportError:
+            return CheckResult("ERROR", "aiohttp not installed (pip install aiohttp)")
+        post = _post_json
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}",
-                json={"contents": [{"parts": [{"text": "ping"}]}]},
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status == 200:
-                    return CheckResult("AUTHENTICATED", f"generateContent against {model} -> 200 OK")
-                if resp.status in (400, 401, 403):
-                    body = (await resp.text())[:150]
-                    return CheckResult("REJECTED", f"HTTP {resp.status}: {body}")
-                body = (await resp.text())[:150]
-                return CheckResult("ERROR", f"HTTP {resp.status}: {body}")
+        status, body = await post(url, headers, payload)
     except Exception as e:
         return CheckResult("ERROR", f"{type(e).__name__}: {e}")
+    if status == -1:
+        return CheckResult("NETWORK BLOCKED", f"egress proxy blocked {host} (host_not_allowed)")
+    result = classify_llm_response(provider, model, status, body)
+    if can_list and result.status == "REJECTED" and llm_chain.model_env(provider) in result.detail:
+        models = await available_models(provider, key, get=get)
+        if models:
+            result = result._replace(detail=f"{result.detail} Available: {', '.join(models[:30])}")
+    return result
+
+
+def llm_checks() -> list[tuple[str, object]]:
+    """(label, coroutine-or-result) for each provider in LLM_CHAIN, in order."""
+    try:
+        providers = llm_chain.parse_chain(os.environ.get("LLM_CHAIN", llm_chain.DEFAULT_CHAIN))
+    except ValueError as e:
+        return [("LLM chain", CheckResult("ERROR", str(e)))]
+    return [(f"LLM {p} ({llm_chain.model_for(p)})", check_llm(p)) for p in providers]
 
 
 async def main() -> int:
@@ -300,7 +446,17 @@ async def main() -> int:
     print("=" * 60)
     print("ENVIRONMENT VARIABLE CHECK  (values masked)")
     print("=" * 60)
-    for name in REQUIRED_VARS:
+    chain = os.environ.get("LLM_CHAIN", llm_chain.DEFAULT_CHAIN)
+    print(f"{'LLM_CHAIN':20} {chain}")
+    try:
+        chain_keys = [llm_chain.key_env(p) for p in llm_chain.parse_chain(chain)]
+    except ValueError:
+        chain_keys = []
+    for name in WORKER_VARS + chain_keys:
+        val = os.environ.get(name)
+        print(f"{name:20} {'PRESENT ' + mask(val) if val else 'MISSING'}")
+    print("-- token service only (MISSING is expected on a worker-only host) --")
+    for name in TOKEN_SERVICE_VARS:
         val = os.environ.get(name)
         print(f"{name:20} {'PRESENT ' + mask(val) if val else 'MISSING'}")
     if not loaded:
@@ -311,16 +467,17 @@ async def main() -> int:
     print("LIVE SERVICE CHECKS  (real authenticated requests)")
     print("=" * 60)
 
+    llm = llm_checks()
     checks = [
         ("Database (DATABASE_URL)", check_database()),
         ("LiveKit", check_livekit()),
         ("Sarvam TTS", check_sarvam_tts()),
         ("Moss", check_moss()),
-        ("Google / LLM", check_google()),
+        *llm,
     ]
     results: dict[str, CheckResult] = {}
-    for name, coro in checks:
-        result = await coro
+    for name, pending in checks:
+        result = pending if isinstance(pending, CheckResult) else await pending
         results[name] = result
         print(f"[{result.status:16}] {name}: {result.detail}")
 
@@ -337,7 +494,8 @@ async def main() -> int:
     line("LiveKit", "LiveKit")
     line("Sarvam TTS", "Sarvam TTS")
     line("Moss", "Moss")
-    line("LLM (Google)", "Google / LLM")
+    for name, _ in llm:
+        line(name, name)
 
     network_blocked = any(r.status == "NETWORK BLOCKED" for r in results.values())
     rejected = any(r.status == "REJECTED" for r in results.values())

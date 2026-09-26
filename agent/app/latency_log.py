@@ -13,6 +13,11 @@ measured across a call. This does, and nothing more.
 OFF BY DEFAULT: does nothing at all unless LATENCY_LOG_PATH is set, so
 production pays neither the disk write nor the open().
 
+LATENCY_LOG_PATH=stdout prints each row to the process log stream instead of
+a file, prefixed with STDOUT_MARKER. A PaaS container's filesystem is
+ephemeral and unreachable; its logs are the one place a deployed worker's
+rows can be read back from. latency_report.py strips the marker on load.
+
 NEVER RECORDS TRANSCRIPT TEXT: only timings, roles, and ids. A benchmark
 artifact has no business holding conversation content -- this project
 isolates tenant data (see docs/adr/001-audit-tenant-id.md) and a latency
@@ -25,9 +30,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
 
 logger = logging.getLogger("agent.latency")
+
+# LATENCY_LOG_PATH value that selects the log stream over a file, and the
+# prefix that lets rows be picked out of mixed log output. latency_report.py
+# keeps its own copy of the marker (it is stdlib-only by design).
+STDOUT_TARGET = "stdout"
+STDOUT_MARKER = "LATENCY_ROW "
 
 # Only these keys are read off MetricsReport. Anything LiveKit adds later is
 # ignored rather than blindly copied, which is what keeps transcript text
@@ -63,8 +75,16 @@ def _write_row(row: dict) -> None:
     if not path:
         return
     try:
+        line = json.dumps(row)
+        if path == STDOUT_TARGET:
+            # One write and flush per row: a short line written in a single
+            # write() can't interleave with rows from other job processes,
+            # and nothing is left buffered when the container stops.
+            sys.stdout.write(STDOUT_MARKER + line + "\n")
+            sys.stdout.flush()
+            return
         with open(path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row) + "\n")
+            fh.write(line + "\n")
     except Exception:
         logger.debug("could not write latency row", exc_info=True)
 
