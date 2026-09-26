@@ -46,13 +46,10 @@ def build_tts():
         target_language_code=_env("SARVAM_TTS_LANGUAGE", "en-IN"),
         model=_env("SARVAM_TTS_MODEL", "bulbul:v3"),
         speaker=_env("SARVAM_TTS_SPEAKER", "shubh"),
-        # Raw PCM: no MP3 encode on Sarvam's side and no decode on ours.
         output_audio_codec="linear16",
-        speech_sample_rate=int(_env("SARVAM_TTS_SAMPLE_RATE", "22050")),
-        # Sarvam's allowed floor is 30 chars. Smaller buffer = first audio
-        # sooner; LiveKit already streams sentence-sized chunks to it.
+        speech_sample_rate=int(_env("SARVAM_TTS_SAMPLE_RATE", "24000")),
         min_buffer_size=int(_env("SARVAM_TTS_MIN_BUFFER", "30")),
-        pace=float(_env("SARVAM_TTS_PACE", "1.1")),
+        pace=float(_env("SARVAM_TTS_PACE", "1.05")),
     )
 
 

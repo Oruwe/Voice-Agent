@@ -108,8 +108,12 @@ export function useLiveKit() {
         }
       });
 
+      room.on(RoomEvent.Reconnected, () => {
+        setConnectionPhase("connected");
+      });
+
       room.on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
-        setConnectionPhase("signed_out"); // caller decides whether to route back to ready_to_connect
+        setConnectionPhase("signed_out");
         setMicPhase("stopped");
         setAgentState("idle");
         setAgentIdentity(null);
@@ -129,14 +133,21 @@ export function useLiveKit() {
         element.dataset.livekitAgentAudio = "true";
         document.body.appendChild(element);
 
-        void element.play().catch((err: unknown) => {
-          pushError(
-            "Audio playback blocked",
-            err instanceof Error
-              ? err.message
-              : "Click the page and reconnect to enable audio.",
-          );
-        });
+        const tryPlay = (attempt: number) => {
+          element.play().catch((err: unknown) => {
+            if (attempt < 3) {
+              setTimeout(() => tryPlay(attempt + 1), 200 * attempt);
+            } else {
+              pushError(
+                "Audio playback blocked",
+                err instanceof Error
+                  ? err.message
+                  : "Click the page and reconnect to enable audio.",
+              );
+            }
+          });
+        };
+        tryPlay(1);
       });
 
       room.on(RoomEvent.TrackUnsubscribed, (track, _publication, participant) => {

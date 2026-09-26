@@ -319,7 +319,7 @@ async def entrypoint(ctx: JobContext) -> None:
     memory = MossLiveMemory(
         moss.client, tenant_id=tenant_id, session_id=session_id,
         top_k=int(os.environ.get("MOSS_TOP_K", "3")),
-        budget_ms=float(os.environ.get("MOSS_BUDGET_MS", "60")),
+        budget_ms=float(os.environ.get("MOSS_BUDGET_MS", "40")),
     )
     memory_task = asyncio.create_task(memory.start())
 
@@ -360,30 +360,24 @@ async def entrypoint(ctx: JobContext) -> None:
         stt=build_stt(),
         llm=FallbackAdapter(
             [
-                # gpt-oss is a reasoning model: every hidden reasoning
-                # token is time-to-first-word. "low" keeps it snappy.
                 openai.LLM(
                     model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
                     api_key=os.environ["GROQ_API_KEY"],
                     base_url="https://api.groq.com/openai/v1",
                     _strict_tool_schema=False,
+                    temperature=float(os.environ.get("LLM_TEMPERATURE", "0.6")),
                 ),
                 google.LLM(model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")),
             ],
-            # Fail over to Gemini fast instead of hanging a live call.
-            attempt_timeout=float(os.environ.get("LLM_ATTEMPT_TIMEOUT", "6")),
+            attempt_timeout=float(os.environ.get("LLM_ATTEMPT_TIMEOUT", "4")),
         ),
         tts=tts,
         vad=ctx.proc.userdata.get("vad") or silero.VAD.load(),
         turn_handling={
-            # Wait this long after speech stops before committing the turn
-            # (LiveKit default 0.5 s).
             "endpointing": {
-                "min_delay": float(os.environ.get("MIN_ENDPOINTING_DELAY", "0.35")),
-                "max_delay": float(os.environ.get("MAX_ENDPOINTING_DELAY", "2.5")),
+                "min_delay": float(os.environ.get("MIN_ENDPOINTING_DELAY", "0.30")),
+                "max_delay": float(os.environ.get("MAX_ENDPOINTING_DELAY", "2.0")),
             },
-            # Start the LLM (and TTS) on the transcript before the turn is
-            # committed; thrown away if the user keeps talking.
             "preemptive_generation": {"enabled": True, "preemptive_tts": True},
         },
     )
