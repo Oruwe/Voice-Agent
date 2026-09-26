@@ -18,10 +18,9 @@ LiveKit's preemptive generation compares the chat context before/after
 `on_user_turn_completed` and discards the early LLM run if it changed --
 doing the lookup in `llm_node` keeps preemptive generation valid.
 
-`entrypoint()` itself has never run against a live LiveKit room in this
-project's history (STATUS_REPORT.md) -- every piece is SDK-verified and
-unit-tested in isolation (see tests/test_agent_entrypoint.py and
-tests/test_moss_memory.py), not exercised end-to-end here.
+TTS/STT: uses the OFFICIAL `livekit-plugins-sarvam` package via
+app/voice_providers/factory.py, which wraps the plugin with env-var-driven
+configuration and TTS prewarming.
 """
 from __future__ import annotations
 
@@ -449,8 +448,6 @@ if __name__ == "__main__":
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
-            # Keep a warm process ready so a new call never waits for a
-            # Python process + model load.
             num_idle_processes=int(os.environ.get("NUM_IDLE_PROCESSES", "1")),
         )
     )
