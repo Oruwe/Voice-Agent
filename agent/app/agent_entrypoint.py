@@ -46,7 +46,7 @@ from livekit import agents, rtc
 from livekit.agents import Agent, AgentSession, JobContext, JobProcess, RunContext, metrics
 from livekit.agents.llm import ChatContext, ChatMessage, function_tool  # type: ignore
 from livekit.agents.voice.events import ConversationItemAddedEvent
-from livekit.plugins import silero  # type: ignore
+from livekit.plugins import sarvam, silero  # type: ignore  # noqa: F401 -- sarvam: see preload below
 
 from app.context.moss_memory import MossLiveMemory, RecallResult
 from app.context.moss_provider import MossContextProvider
@@ -70,6 +70,14 @@ from app.security.session_boundary import (
 from app.tools.definitions import build_tool_registry
 from app.voice_providers.factory import build_stt, build_tts, prewarm_tts
 from app.voice_providers.llm_chain import build_llm, preload_llm_plugins
+
+# LiveKit registers a plugin when it's imported and refuses to do so off the
+# main thread. With JOB_EXECUTOR=thread every call runs on a worker thread, so
+# a plugin first imported inside a call (as factory.py and llm_chain.py do)
+# would crash that call. Importing them here -- module load, main thread --
+# covers both executors: process mode's forkserver preloads whatever is
+# registered at startup.
+preload_llm_plugins()
 
 logger = logging.getLogger("agent.entrypoint")
 
@@ -454,9 +462,6 @@ def prewarm(proc: JobProcess) -> None:
     """Runs once per worker process, before any job: load models here so no
     caller ever waits on them."""
     proc.userdata["vad"] = silero.VAD.load()
-    # Importing livekit.plugins.google on a call's first turn blocked that
-    # call's event loop for ~1.2 s in production.
-    preload_llm_plugins()
 
 
 def _job_executor_type() -> agents.JobExecutorType:
