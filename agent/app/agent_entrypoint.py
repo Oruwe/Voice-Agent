@@ -44,9 +44,9 @@ load_dotenv(override=True)
 
 from livekit import agents, rtc
 from livekit.agents import Agent, AgentSession, JobContext, JobProcess, RunContext, metrics
-from livekit.agents.llm import ChatContext, ChatMessage, FallbackAdapter, function_tool  # type: ignore
+from livekit.agents.llm import ChatContext, ChatMessage, function_tool  # type: ignore
 from livekit.agents.voice.events import ConversationItemAddedEvent
-from livekit.plugins import google, openai, silero  # type: ignore
+from livekit.plugins import silero  # type: ignore
 
 from app.context.moss_memory import MossLiveMemory, RecallResult
 from app.context.moss_provider import MossContextProvider
@@ -69,6 +69,7 @@ from app.security.session_boundary import (
 )
 from app.tools.definitions import build_tool_registry
 from app.voice_providers.factory import build_stt, build_tts, prewarm_tts
+from app.voice_providers.llm_chain import build_llm
 
 logger = logging.getLogger("agent.entrypoint")
 
@@ -364,19 +365,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     session: AgentSession = AgentSession(
         stt=build_stt(),
-        llm=FallbackAdapter(
-            [
-                openai.LLM(
-                    model=os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"),
-                    api_key=os.environ["GROQ_API_KEY"],
-                    base_url="https://api.groq.com/openai/v1",
-                    _strict_tool_schema=False,
-                    temperature=float(os.environ.get("LLM_TEMPERATURE", "0.6")),
-                ),
-                google.LLM(model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")),
-            ],
-            attempt_timeout=float(os.environ.get("LLM_ATTEMPT_TIMEOUT", "4")),
-        ),
+        llm=build_llm(),
         tts=tts,
         vad=ctx.proc.userdata.get("vad") or silero.VAD.load(),
         turn_handling={

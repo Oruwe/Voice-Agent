@@ -1,6 +1,7 @@
 """
 Builds the STT/TTS pair for the agent session using the official
-`livekit-plugins-sarvam` plugin.
+`livekit-plugins-sarvam` plugin. (The LLM chain lives next door in
+llm_chain.py.)
 
 Why the official plugin, not a hand-rolled port:
 * STT keeps ONE streaming WebSocket open for the whole call (no per-utterance
