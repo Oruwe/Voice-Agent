@@ -27,6 +27,16 @@ class MossUnavailableError(Exception):
     """
 
 
+def _str_metadata(metadata: dict | None) -> dict[str, str] | None:
+    """Moss's DocumentInfo only accepts str metadata values -- an int raises
+    TypeError. chunk_text() emits an int `chunk` index, so without this every
+    document upload failed to index. Coerced here, at the Moss boundary, so
+    no caller has to know about the SDK's typing."""
+    if metadata is None:
+        return None
+    return {str(k): str(v) for k, v in metadata.items()}
+
+
 class MossContextProvider:
     def __init__(self, project_id: str, project_key: str):
         self._client = MossClient(project_id, project_key)
@@ -120,7 +130,7 @@ class MossContextProvider:
             DocumentInfo(
                 id=str(doc["id"]),
                 text=str(doc["text"]),
-                metadata=doc.get("metadata"),
+                metadata=_str_metadata(doc.get("metadata")),
                 embedding=doc.get("embedding"),
                 payload=doc.get("payload"),
             )

@@ -19,5 +19,8 @@ pyjwt
 uvicorn
 qdrant-client[fastembed]
 pypdf>=3.0
+# pypdf needs fonttools to decode CFF Type1 fonts (common in exported PDFs);
+# without it, text from those fonts can come out wrong and every page logs an error.
+fonttools
 python-docx>=1.0
 python-multipart

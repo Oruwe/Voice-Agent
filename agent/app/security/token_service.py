@@ -18,6 +18,7 @@ project's own earlier `/v1/dev/token` pattern (a different, no-longer-
 present project, but the same *principle*: dev convenience must be
 structurally incapable of running outside dev).
 """
+import asyncio
 import logging
 import os
 
@@ -261,16 +262,23 @@ async def upload_document(
     tenant_id = identity.tenant_slug  # Moss/Qdrant use the slug as namespace
 
     content = await file.read()
+    filename = file.filename or "document"
+    content_type = file.content_type or ""
     try:
-        text = parse_document(content, file.content_type or "")
+        # pypdf and python-docx are synchronous and CPU-bound. Run inline, a
+        # large PDF blocked this event loop for ~45 s in production -- every
+        # other request, including token minting, waited behind it.
+        text = await asyncio.to_thread(parse_document, content, content_type)
     except Exception as e:
+        logger.warning("upload rejected: %s (%s, %d bytes): %s", filename, content_type, len(content), e)
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e)) from e
 
-    chunks = chunk_text(text, doc_name=file.filename or "document")
+    chunks = await asyncio.to_thread(chunk_text, text, doc_name=filename)
     if not chunks:
+        logger.warning("upload rejected: no extractable text in %s (%s, %d bytes)", filename, content_type, len(content))
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Could not extract text from document",
+            detail="Could not extract text from document (scanned or image-only files have no text layer)",
         )
 
     doc_id = chunks[0]["id"].split(":")[0]  # stable hash prefix shared by all chunks
@@ -282,8 +290,15 @@ async def upload_document(
             project_key=os.environ["MOSS_PROJECT_KEY"],
         )
         await moss.upsert_context(tenant_id=tenant_id, logical_name="knowledge", docs=chunks)
-    except Exception:
+    except Exception as e:
         logger.exception("moss upsert failed for tenant %s doc %s", tenant_id, doc_id)
+        # Moss is where the agent reads the knowledge base from. Returning
+        # "indexed" after this failed is how a broken upload looked like a
+        # success; say so instead, and the UI shows it.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="The document was read but could not be added to the knowledge base. Please try again.",
+        ) from e
 
     # Upsert to Qdrant if configured — keyword-triggered deeper retrieval.
     if os.environ.get("QDRANT_URL"):
