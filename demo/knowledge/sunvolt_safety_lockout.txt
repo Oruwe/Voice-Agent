@@ -1,0 +1,13 @@
+SUNVOLT ENERGY - FIELD SAFETY AND LOCKOUT-TAGOUT RULES (SOP-S-11)
+
+Lockout-tagout colours: SunVolt uses a RED tag and an ORANGE padlock for every isolation. A blue padlock means another contractor is working; never remove it. Each technician carries their own orange padlock and keeps the only key.
+
+Two-person rule: Any work on strings above 600 V DC requires two SunVolt-certified technicians on site. Working alone above 600 V DC is a fireable safety violation, even for a quick check.
+
+Rooftop wind limit: No rooftop array work when wind speed is above 40 km/h. Check the wind on the SunVolt Field app before climbing. At 40 km/h or more, reschedule and log the reason.
+
+Rain and monsoon rule: Wait at least 30 minutes after rain stops before touching any DC string, connector or combiner box. Wet MC4 connectors are the main cause of E-07 faults and of shocks.
+
+Roofs without a parapet: A full-body harness clipped to the anchor line is mandatory on roofs without a parapet wall, including Site 14 Hosur. No harness, no climb.
+
+Personal protective equipment for DC work: Class 0 insulated gloves rated 1000 V, arc-rated face shield for combiner boxes, and safety shoes. Gloves must be air-tested at the start of every shift.
