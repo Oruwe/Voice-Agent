@@ -335,6 +335,7 @@ async def entrypoint(ctx: JobContext) -> None:
         moss.client, tenant_id=tenant_id, session_id=session_id,
         top_k=int(os.environ.get("MOSS_TOP_K", "3")),
         budget_ms=float(os.environ.get("MOSS_BUDGET_MS", "40")),
+        live_memory=os.environ.get("MOSS_LIVE_MEMORY", "true").strip().lower() != "false",
     )
     memory_task = asyncio.create_task(memory.start())
 

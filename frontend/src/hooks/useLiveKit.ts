@@ -374,6 +374,36 @@ export function useLiveKit() {
     }
   }, [pushError]);
 
+  const sendChat = useCallback(
+    async (text: string) => {
+      const room = roomRef.current;
+      const message = text.trim();
+      if (!room || !message) return;
+      const now = Date.now();
+      // The agent reads "lk.chat" as a user turn but never echoes it back as a
+      // transcription, so the typed message is shown here.
+      setTranscript((prev) => [
+        ...prev,
+        {
+          id: `chat-${now}`,
+          speaker: "user",
+          participantIdentity: room.localParticipant.identity,
+          text: message,
+          final: true,
+          firstReceivedAt: now,
+          lastReceivedAt: now,
+        },
+      ]);
+      pendingTurnRef.current = { userText: message, userFinalAt: now };
+      try {
+        await room.localParticipant.sendText(message, { topic: "lk.chat" });
+      } catch (err) {
+        pushError("Chat error", err instanceof Error ? err.message : "Could not send the message.");
+      }
+    },
+    [pushError],
+  );
+
   const toggleMute = useCallback(async () => {
     const room = roomRef.current;
     if (!room) return;
@@ -412,5 +442,6 @@ export function useLiveKit() {
     startMicrophone,
     stopMicrophone,
     toggleMute,
+    sendChat,
   };
 }

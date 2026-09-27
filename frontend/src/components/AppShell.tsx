@@ -7,6 +7,7 @@ import { ConnectionStatus } from "./ConnectionStatus";
 import { VoiceVisualizer } from "./VoiceVisualizer";
 import { VoiceControls } from "./VoiceControls";
 import { TranscriptPanel } from "./TranscriptPanel";
+import { ChatInput } from "./ChatInput";
 import { ToolEventCard } from "./ToolEventCard";
 import { ErrorBanner } from "./ErrorBanner";
 import { DocumentUpload } from "./DocumentUpload";
@@ -33,6 +34,7 @@ interface AppShellProps {
   onStartMic: () => void;
   onStopMic: () => void;
   onToggleMute: () => void;
+  onSendChat: (text: string) => Promise<void>;
   signInSlot: ReactNode;
   showSignIn: boolean;
   accessToken?: string | null;
@@ -61,6 +63,7 @@ export function AppShell({
   onStartMic,
   onStopMic,
   onToggleMute,
+  onSendChat,
   signInSlot,
   showSignIn,
   accessToken,
@@ -161,6 +164,7 @@ export function AppShell({
               <h2 className="panel__header-title">Conversation</h2>
             </div>
             <TranscriptPanel entries={transcript} isConnected={isConnected} latencies={latencies} />
+            <ChatInput isConnected={isConnected} onSend={onSendChat} />
           </section>
 
           {/* Right: intelligence panel */}
