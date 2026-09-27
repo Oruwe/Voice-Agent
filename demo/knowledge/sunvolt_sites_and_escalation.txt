@@ -1,0 +1,11 @@
+SUNVOLT ENERGY - SITE DIRECTORY AND ESCALATION MATRIX (Karnataka and Tamil Nadu cluster)
+
+Escalation levels: L1 is the field technician on site. L2 is the regional engineer: for the Hosur hub this is Priya Raman, reachable on extension 4417 of the SunVolt ops line. L3 is the SunVolt engineering desk in Bengaluru, reached only through L2. Escalate to L2 for any E-33, any insulation reading below 2 megaohm, or any inverter that fails to restart twice.
+
+Site 14 - Hosur Textile Mill: Four SV-5K inverters, INV-1 to INV-4, on a rooftop with no parapet wall. Gate code is 2741. A guard dog named Raja is kept at the main gate; ask the security guard to tie him before entering. Known issue: INV-3 has repeated E-07 faults every monsoon because string 2 connectors take in water.
+
+Site 22 - Tumkur Cold Storage: Site contact is the store manager, Mr. Hegde; access only 9 am to 5 pm through the loading bay. Two SV-5K inverters, INV-1 and INV-2, ground-mounted. Keep the cold-room doors closed; opening them trips the storage alarm.
+
+Site 31 - Mysuru School Rooftop: One SV-5K inverter, INV-1. Work only on Sundays or school holidays; children are on site on weekdays. The key to the rooftop door is with the school principal's office.
+
+Ticket priorities: urgent for any safety risk or E-33; high when a site is producing less than half its expected power; normal for derated output such as E-19; low for monitoring-only faults such as E-21.

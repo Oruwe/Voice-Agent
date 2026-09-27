@@ -1,0 +1,13 @@
+SUNVOLT ENERGY - SV-5K INVERTER FAULT CODE GUIDE (Field Edition, Rev 4.2)
+
+Fault E-07 (DC ground fault / insulation fault) on the SV-5K inverter: Turn the DC isolator OFF. Wait exactly 7 minutes for the SV-5K capacitors to discharge before touching any terminal. Measure string insulation with the Fluke 1507 at 1000 V. If insulation is below 2 megaohm, do NOT restart the inverter: tag it out and escalate to L2. If insulation is above 2 megaohm, restart from the AC side first, then turn the DC isolator back ON.
+
+Fault E-07 in monsoon season: Most E-07 faults between June and September are caused by water in the MC4 connectors of string 2. Dry the connectors with the heat gun set to 60 degrees C, never higher, then re-test insulation before restarting.
+
+Fault E-12 (grid overvoltage) on the SV-5K: If grid voltage reads above 253 V on three readings one minute apart, switch the inverter to Volt-Watt mode using service code VW-2 on the front panel. Do not reset E-12 repeatedly; more than 3 resets in a day locks the inverter for 24 hours.
+
+Fault E-19 (cooling fan failure) on the SV-5K: The inverter derates to 50 percent output. Replace the fan with spare part number FN-9921, stocked in bin B3 of every SunVolt service van. Fan swap takes about 15 minutes and needs only the DC isolator OFF, not a full lockout.
+
+Fault E-21 (communication loss with the SunVolt cloud): The inverter keeps producing power. Power-cycle the WiFi dongle labelled SV-LINK by unplugging it for 30 seconds. If E-21 returns within an hour, replace the dongle; do not reset the inverter for E-21.
+
+Fault E-33 (arc fault detected): Treat as dangerous. Do not restart. Isolate both AC and DC, apply full lockout-tagout, photograph the string connectors, and escalate to L2 immediately. An E-33 must never be cleared by an L1 technician.

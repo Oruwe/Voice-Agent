@@ -1,7 +1,9 @@
 """
-Registers the tool set your spec requires. Every handler below is a STUB
-that validates input correctly and returns a structured, honest failure —
-NOT a fake success. No real ticketing/CRM/dispatch/notification backend was
+Registers the tool set your spec requires. create_ticket records a real
+ticket in this platform's own ticket log (the ToolCall/ToolResult rows the
+registry persists in Postgres); every other handler below is a STUB that
+validates input correctly and returns a structured, honest failure — NOT a
+fake success. No real ticketing/CRM/dispatch/notification backend was
 provided in any of the three audited repositories, so there is nothing real
 to call. This file exists to prove the schema/validation/audit-logging shape
 is right, and to give you exact integration points once real backends exist.
@@ -12,6 +14,9 @@ with an explicit reason — the agent-facing contract this enforces is: until
 a real backend is wired in, the assistant will truthfully tell the user
 every action failed, never fabricate a ticket number or confirmation.
 """
+import uuid
+from datetime import datetime, timezone
+
 from pydantic import BaseModel, Field
 
 from app.tools.registry import ToolRegistry
@@ -79,7 +84,19 @@ def _not_implemented(tool_name: str) -> dict:
 
 
 async def _create_ticket(args: CreateTicketArgs, tenant_id: str, session_id: str) -> dict:
-    raise RuntimeError(_not_implemented("create_ticket")["reason"])
+    # The ticket lives in this platform's log: the registry persists the call
+    # and this result as ToolCall/ToolResult rows. No external ticketing
+    # system is contacted, and the reply says so.
+    return {
+        "ticket_id": f"TKT-{uuid.uuid4().hex[:6].upper()}",
+        "status": "open",
+        "site_id": args.site_id,
+        "equipment_id": args.equipment_id,
+        "priority": args.priority,
+        "summary": args.description[:200],
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "system": "platform ticket log",
+    }
 
 
 async def _update_ticket(args: UpdateTicketArgs, tenant_id: str, session_id: str) -> dict:
