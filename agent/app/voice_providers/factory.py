@@ -36,6 +36,11 @@ def build_stt():
         # "codemix" is worth trying for Hinglish/Kanglish speakers.
         mode=_env("SARVAM_STT_MODE", "transcribe"),
         high_vad_sensitivity=_env("SARVAM_STT_HIGH_VAD", "true").lower() == "true",
+        # The plugin sends {"type": "flush"} the moment Sarvam's VAD hears the
+        # user stop, but the server only acts on it with flush_signal=true in
+        # the socket URL. Without it the final transcript -- which is what
+        # starts the LLM -- waits on the server's own timeout.
+        flush_signal=_env("SARVAM_STT_FLUSH", "true").lower() == "true",
     )
 
 
@@ -49,11 +54,24 @@ def tts_voice() -> tuple[str, str, str]:
     )
 
 
+def first_sentence_tokenizer():
+    """Splits LLM text into the chunks sent to Sarvam. A sentence is sent once
+    the next one starts; the plugin's default also held back any sentence
+    under 20 characters, so a short opener like "It is offline." waited for
+    the whole following sentence before synthesis could begin."""
+    from livekit.agents import tokenize
+
+    return tokenize.basic.SentenceTokenizer(
+        min_sentence_len=int(_env("TTS_MIN_SENTENCE_LEN", "8")),
+        stream_context_len=int(_env("TTS_SENTENCE_LOOKAHEAD", "3")),
+    )
+
+
 def build_tts():
     from livekit.plugins import sarvam
 
     model, speaker, language = tts_voice()
-    return sarvam.TTS(
+    tts = sarvam.TTS(
         api_key=os.environ["SARVAM_API_KEY"],
         target_language_code=language,
         model=model,
@@ -64,6 +82,10 @@ def build_tts():
         max_chunk_length=int(_env("SARVAM_TTS_MAX_CHUNK", "150")),
         pace=float(_env("SARVAM_TTS_PACE", "1.05")),
     )
+    # sarvam.TTS takes no tokenizer argument; livekit-plugins-sarvam is pinned
+    # (requirements.txt) and a test asserts this attribute still exists.
+    tts._opts.word_tokenizer = first_sentence_tokenizer()
+    return tts
 
 
 def prewarm_tts(tts) -> None:

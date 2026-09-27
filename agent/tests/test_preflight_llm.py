@@ -237,3 +237,92 @@ def test_invalid_chain_is_one_error_result_not_a_crash():
     name, result = checks[0]
     assert result.status == "ERROR"
     assert "nope" in result.detail
+
+
+# --------------------------------------------------------------------------
+# timing: the LLM is the largest stage of a voice reply, so measure it
+# --------------------------------------------------------------------------
+
+def test_passing_check_is_timed_warm_over_the_same_transport():
+    calls = []
+
+    async def post(url, headers, payload):
+        calls.append(url)
+        return 200, "{}"
+
+    with _env():
+        r = _run(preflight.check_llm("groq", post=post))
+    assert r.status == "AUTHENTICATED"
+    assert len(calls) == preflight.TIMING_SAMPLES  # one cold, the rest warm
+    assert r.ms is not None and r.ms >= 0
+    assert "ms warm" in r.detail and "ms cold" in r.detail
+
+
+def test_failed_check_is_not_timed():
+    calls = []
+
+    async def post(*_):
+        calls.append(1)
+        return 401, '{"error":{"code":"invalid_api_key"}}'
+
+    with _env():
+        r = _run(preflight.check_llm("groq", post=post))
+    assert r.ms is None and len(calls) == 1
+
+
+def test_a_warm_request_failing_keeps_the_verdict():
+    """A 429 on a timing request doesn't turn a working key into a failure."""
+    replies = iter([(200, "{}"), (429, "rate limit")])
+
+    async def post(*_):
+        return next(replies)
+
+    with _env():
+        r = _run(preflight.check_llm("groq", post=post))
+    assert r.status == "AUTHENTICATED" and r.ms is not None
+
+
+def test_reasoning_effort_is_only_sent_to_models_that_reason():
+    """Switching GROQ_MODEL to a fast non-reasoning model must not start
+    failing because GROQ_REASONING_EFFORT is still set on the host."""
+    with _env(GROQ_REASONING_EFFORT="low"):
+        _, _, _, fast = preflight.llm_request("groq", "llama-3.1-8b-instant", "gsk-x")
+        _, _, _, oss = preflight.llm_request("groq", "openai/gpt-oss-20b", "gsk-x")
+    assert "reasoning_effort" not in fast
+    assert oss["reasoning_effort"] == "low"
+
+
+# --------------------------------------------------------------------------
+# probe_checks: LLM_PROBE_MODELS
+# --------------------------------------------------------------------------
+
+def test_no_probes_by_default():
+    with _env():
+        os.environ.pop("LLM_PROBE_MODELS", None)
+        assert preflight.probe_checks() == []
+
+
+def test_probes_time_each_named_model():
+    with _env(LLM_PROBE_MODELS=" groq:llama-3.1-8b-instant , sarvam:sarvam-m "):
+        checks = preflight.probe_checks()
+    _close(checks)
+    assert [n for n, _ in checks] == ["probe groq (llama-3.1-8b-instant)", "probe sarvam (sarvam-m)"]
+
+
+@pytest.mark.parametrize("entry", ["groq", "groq:", "nope:model"])
+def test_malformed_probe_is_an_error_not_a_crash(entry):
+    with _env(LLM_PROBE_MODELS=entry):
+        (name, result), = preflight.probe_checks()
+    assert result.status == "ERROR"
+
+
+def test_probe_sends_the_probed_model_not_the_configured_one():
+    sent = []
+
+    async def post(url, headers, payload):
+        sent.append(payload["model"])
+        return 200, "{}"
+
+    with _env(GROQ_MODEL="openai/gpt-oss-120b"):
+        _run(preflight.check_llm("groq", model="llama-3.1-8b-instant", post=post))
+    assert set(sent) == {"llama-3.1-8b-instant"}

@@ -138,6 +138,16 @@ def test_groq_sends_reasoning_effort_only_when_configured():
     assert "reasoning_effort" not in llm.call_args.kwargs
 
 
+def test_groq_reasoning_effort_is_skipped_for_a_model_that_does_not_reason():
+    """Groq rejects reasoning_effort=low for non-reasoning models, so moving
+    GROQ_MODEL to a fast one must not also require clearing this variable."""
+    with _env(GROQ_REASONING_EFFORT="low", GROQ_MODEL="llama-3.1-8b-instant"), \
+            patch("livekit.plugins.openai.LLM") as llm:
+        llm_chain._build_groq()
+    assert "reasoning_effort" not in llm.call_args.kwargs
+    assert llm.call_args.kwargs["model"] == "llama-3.1-8b-instant"
+
+
 def test_preload_imports_exactly_the_chains_plugins():
     with _env(LLM_CHAIN="groq,sarvam"), patch("importlib.import_module") as imp:
         llm_chain.preload_llm_plugins()

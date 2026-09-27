@@ -113,7 +113,8 @@ class FieldOpsAssistant(Agent):
             instructions=(
                 "You are an operational AI assistant for field workers, technicians, "
                 "and dispatch operators. You are speaking out loud: keep replies to one "
-                "or two short sentences, no lists, no markdown. Relevant memory and "
+                "or two short sentences, no lists, no markdown, and make the first "
+                "sentence short -- it is spoken while the rest is generated. Relevant memory and "
                 "knowledge-base context is injected automatically before each of your "
                 "replies -- use it directly. Only call `retrieve_context` if the "
                 "injected context is clearly not enough. For any request to create "
@@ -374,7 +375,7 @@ async def entrypoint(ctx: JobContext) -> None:
         stt=build_stt(),
         llm=build_llm(),
         tts=tts,
-        vad=ctx.proc.userdata.get("vad") or silero.VAD.load(),
+        vad=ctx.proc.userdata.get("vad") or load_vad(),
         turn_handling={
             "endpointing": {
                 "min_delay": float(os.environ.get("MIN_ENDPOINTING_DELAY", "0.25")),
@@ -458,10 +459,21 @@ async def entrypoint(ctx: JobContext) -> None:
     logger.info("agent live: tenant=%s session=%s", tenant_id, session_id)
 
 
+def load_vad():
+    """Silero VAD with a shorter end-of-speech silence window.
+
+    LiveKit only starts its endpointing timer (MIN_ENDPOINTING_DELAY) once the
+    VAD reports the user stopped, and silero's default waits 0.55 s of silence
+    before reporting it -- so every turn ended ~0.58 s after the last word and
+    MIN_ENDPOINTING_DELAY=0.25 never took effect. Below ~0.3 s a natural pause
+    mid-sentence ("the pump at... site four") starts ending turns early."""
+    return silero.VAD.load(min_silence_duration=float(os.environ.get("VAD_MIN_SILENCE", "0.35")))
+
+
 def prewarm(proc: JobProcess) -> None:
     """Runs once per worker process, before any job: load models here so no
     caller ever waits on them."""
-    proc.userdata["vad"] = silero.VAD.load()
+    proc.userdata["vad"] = load_vad()
 
 
 def _job_executor_type() -> agents.JobExecutorType:

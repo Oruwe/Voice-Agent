@@ -13,7 +13,7 @@ import pytest
 
 from livekit.agents import JobExecutorType
 
-from app.agent_entrypoint import FieldOpsAssistant, _job_executor_type, _record_boundary_failure
+from app.agent_entrypoint import FieldOpsAssistant, _job_executor_type, _record_boundary_failure, load_vad
 from app.context.types import ContextBundle
 from app.security.identity import TenantNotFoundError, UserNotFoundError
 from app.security.session_boundary import AuthenticationRejectedError, NoParticipantError
@@ -154,6 +154,22 @@ def test_job_executor_typo_fails_at_startup_naming_the_variable(monkeypatch):
     monkeypatch.setenv("JOB_EXECUTOR", "threads")
     with pytest.raises(ValueError, match="JOB_EXECUTOR"):
         _job_executor_type()
+
+
+# --------------------------------------------------------------------------
+# load_vad: the end-of-speech silence window
+# --------------------------------------------------------------------------
+
+def test_vad_ends_speech_after_a_shorter_silence_than_silero_default(monkeypatch):
+    """silero's 0.55 s default made every turn end ~0.58 s after the last
+    word, and MIN_ENDPOINTING_DELAY (0.25) could never shorten that."""
+    monkeypatch.delenv("VAD_MIN_SILENCE", raising=False)
+    assert load_vad()._opts.min_silence_duration == pytest.approx(0.35)
+
+
+def test_vad_silence_window_is_tunable_without_a_deploy(monkeypatch):
+    monkeypatch.setenv("VAD_MIN_SILENCE", "0.5")
+    assert load_vad()._opts.min_silence_duration == pytest.approx(0.5)
 
 
 # --------------------------------------------------------------------------

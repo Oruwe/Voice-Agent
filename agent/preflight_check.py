@@ -27,7 +27,11 @@ data is written anywhere, nothing is deleted.
 For the LLM it sends a 1-token completion to every provider in LLM_CHAIN,
 using the model the worker will actually call (llm_chain.model_for). A
 retired model or a rejected key is otherwise invisible until a live call:
-FallbackAdapter quietly routes around the broken provider.
+FallbackAdapter quietly routes around the broken provider. Each passing
+check is timed (cold, then warm on the same connection), and
+LLM_PROBE_MODELS="groq:model-a,groq:model-b" times candidate models too --
+the LLM's first token is the largest stage of a voice reply, so pick the
+model from these numbers.
 
 On the deployed worker it runs at every boot, ahead of the agent, so these
 results are the first thing in the worker's logs.
@@ -44,9 +48,12 @@ Usage (Windows, macOS, Linux -- all the same):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import socket
+import statistics
 import sys
+import time
 import urllib.parse
 from typing import NamedTuple
 
@@ -64,6 +71,7 @@ TOKEN_SERVICE_VARS = ["JWT_SECRET", "JWT_ISSUER", "ENVIRONMENT"]
 class CheckResult(NamedTuple):
     status: str  # "AUTHENTICATED" | "REJECTED" | "NETWORK BLOCKED" | "MISSING" | "ERROR"
     detail: str  # human-readable, never contains a secret
+    ms: float | None = None  # LLM checks: warm reply time, when the check passed
 
 
 def mask(value: str) -> str:
@@ -281,7 +289,7 @@ def llm_request(provider: str, model: str, key: str) -> tuple[str, str, dict, di
     ping = [{"role": "user", "content": "ping"}]
     if provider == "groq":
         body = {"model": model, "messages": ping, "max_completion_tokens": 16}
-        effort = llm_chain.groq_reasoning_effort()
+        effort = llm_chain.groq_reasoning_effort(model)
         if effort:
             # Sent exactly as the worker sends it: Groq rejects the parameter
             # for models that don't reason, and that should fail here.
@@ -382,47 +390,84 @@ async def available_models(provider: str, key: str, *, get=None) -> list[str] | 
     return None
 
 
-async def _post_json(url: str, headers: dict, payload: dict) -> tuple[int, str]:
+@contextlib.asynccontextmanager
+async def _http_post():
+    """A `post(url, headers, payload)` over ONE pooled connection, the way the
+    agent's own LLM client holds it for a whole call -- so the timed requests
+    after the first measure the provider, not a fresh TLS handshake."""
     import aiohttp
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=15)
-        ) as resp:
-            if resp.headers.get("x-deny-reason") == "host_not_allowed":
-                return -1, "host_not_allowed"
-            return resp.status, await resp.text()
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+        async def post(url: str, headers: dict, payload: dict) -> tuple[int, str]:
+            async with session.post(url, headers=headers, json=payload) as resp:
+                if resp.headers.get("x-deny-reason") == "host_not_allowed":
+                    return -1, "host_not_allowed"
+                return resp.status, await resp.text()
+
+        yield post
 
 
-async def check_llm(provider: str, *, post=None, get=None) -> CheckResult:
-    """One tiny completion against `provider` with the model the worker will
-    call. `post`/`get` are injectable for tests; they default to aiohttp."""
+# Requests per passing LLM check: the first (cold: DNS + TLS) decides the
+# verdict, the rest reuse its connection and give the warm time a live call sees.
+TIMING_SAMPLES = 3
+
+
+async def _timed(post, url: str, headers: dict, payload: dict) -> tuple[int, str, float]:
+    start = time.perf_counter()
+    status, body = await post(url, headers, payload)
+    return status, body, (time.perf_counter() - start) * 1000
+
+
+async def check_llm(provider: str, *, model: str | None = None, post=None, get=None) -> CheckResult:
+    """A tiny completion against `provider` with the model the worker will
+    call (or `model`, for a latency probe), timed. `post`/`get` are
+    injectable for tests; they default to aiohttp."""
     key = os.environ.get(llm_chain.key_env(provider), "").strip()
     if not key:
         return CheckResult("MISSING", f"{llm_chain.key_env(provider)} not set")
 
-    model = llm_chain.model_for(provider)
+    model = model or llm_chain.model_for(provider)
     host, url, headers, payload = llm_request(provider, model, key)
 
     # Listing follows the transport: real network in real use, stubbed with post in tests.
     can_list = post is None or get is not None
-    if post is None:
-        blocked = await egress_probe(host)
-        if blocked:
-            return blocked
-        try:
-            import aiohttp  # noqa: F401
-        except ImportError:
-            return CheckResult("ERROR", "aiohttp not installed (pip install aiohttp)")
-        post = _post_json
+    if post is not None:
+        return await _run_llm_check(provider, model, key, url, headers, payload, post, get, can_list)
 
+    blocked = await egress_probe(host)
+    if blocked:
+        return blocked
     try:
-        status, body = await post(url, headers, payload)
+        import aiohttp  # noqa: F401
+    except ImportError:
+        return CheckResult("ERROR", "aiohttp not installed (pip install aiohttp)")
+    async with _http_post() as post:
+        return await _run_llm_check(provider, model, key, url, headers, payload, post, get, can_list)
+
+
+async def _run_llm_check(provider, model, key, url, headers, payload, post, get, can_list) -> CheckResult:
+    try:
+        status, body, cold_ms = await _timed(post, url, headers, payload)
     except Exception as e:
         return CheckResult("ERROR", f"{type(e).__name__}: {e}")
     if status == -1:
+        host = urllib.parse.urlparse(url).hostname
         return CheckResult("NETWORK BLOCKED", f"egress proxy blocked {host} (host_not_allowed)")
     result = classify_llm_response(provider, model, status, body)
+    if result.status == "AUTHENTICATED":
+        warm = []
+        for _ in range(TIMING_SAMPLES - 1):
+            try:
+                status, _, ms = await _timed(post, url, headers, payload)
+            except Exception:
+                break
+            if status != 200:
+                break
+            warm.append(ms)
+        ms = statistics.median(warm) if warm else cold_ms
+        return result._replace(
+            detail=f"{model} replied in {ms:.0f} ms warm ({cold_ms:.0f} ms cold)", ms=ms
+        )
     if can_list and result.status == "REJECTED" and llm_chain.model_env(provider) in result.detail:
         models = await available_models(provider, key, get=get)
         if models:
@@ -437,6 +482,26 @@ def llm_checks() -> list[tuple[str, object]]:
     except ValueError as e:
         return [("LLM chain", CheckResult("ERROR", str(e)))]
     return [(f"LLM {p} ({llm_chain.model_for(p)})", check_llm(p)) for p in providers]
+
+
+def probe_checks() -> list[tuple[str, object]]:
+    """(label, coroutine-or-result) for each "provider:model" in LLM_PROBE_MODELS.
+
+    Times candidate models from where the worker actually runs, so choosing
+    GROQ_MODEL is a measurement rather than a guess. Informational: a probe
+    never changes the PASS/FAIL verdict."""
+    raw = os.environ.get("LLM_PROBE_MODELS", "")
+    out: list[tuple[str, object]] = []
+    for entry in (e.strip() for e in raw.split(",")):
+        if not entry:
+            continue
+        provider, sep, model = entry.partition(":")
+        provider, model = provider.strip().lower(), model.strip()
+        if not sep or not model or provider not in ("groq", "gemini", "sarvam"):
+            out.append((f"probe {entry}", CheckResult("ERROR", "expected provider:model, e.g. groq:llama-3.1-8b-instant")))
+            continue
+        out.append((f"probe {provider} ({model})", check_llm(provider, model=model)))
+    return out
 
 
 async def main() -> int:
@@ -480,6 +545,14 @@ async def main() -> int:
         result = pending if isinstance(pending, CheckResult) else await pending
         results[name] = result
         print(f"[{result.status:16}] {name}: {result.detail}")
+
+    probes = probe_checks()
+    if probes:
+        print()
+        print("LLM LATENCY PROBE  (LLM_PROBE_MODELS -- informational, never affects PASS/FAIL)")
+        for name, pending in probes:
+            result = pending if isinstance(pending, CheckResult) else await pending
+            print(f"[{result.status:16}] {name}: {result.detail}")
 
     print()
     print("REAL VOICE PIPELINE STATUS")

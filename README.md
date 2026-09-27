@@ -31,9 +31,9 @@ docs/adr/    Architecture decision records
   (`agent_entrypoint.py`, `context/embeddings.py`,
   `context/moss_provider.py`, `context/qdrant_provider.py`,
   `tools/definitions.py`) now have dedicated tests.
-- **Backend, current**: 208 tests pass against a real PostgreSQL
+- **Backend, current**: 227 tests pass against a real PostgreSQL
   (`pytest --ignore=tests/test_auth_identity.py` with `DATABASE_URL` set).
-  159 of them run without a database. Migration `0001` passes upgrade →
+  178 of them run without a database. Migration `0001` passes upgrade →
   downgrade → upgrade against the same server. `tests/test_auth_identity.py`
   fails to import because of an unrelated, pre-existing `ExpiredTokenError`
   symbol.
@@ -194,6 +194,26 @@ transcript text.
 On a deployed worker, set `LATENCY_LOG_PATH=stdout`. Rows go to the worker's
 logs prefixed `LATENCY_ROW`, and `latency_report.py` reads a log export
 directly: it picks out the marked rows and skips every other line.
+
+### Where the time goes
+
+LiveKit starts the LLM as soon as the final transcript arrives (preemptive
+generation), so turn-end detection runs in parallel with it. The critical
+path is STT → LLM → TTS. The first production run (Railway Singapore,
+n=5) before the latency tuning:
+
+| Stage | p50 | Lever |
+|---|---|---|
+| STT final transcript | 254 ms | `SARVAM_STT_FLUSH=true` (finalize on Sarvam's end-of-speech) |
+| LLM first token | 485 ms | a non-reasoning `GROQ_MODEL`, measured with `LLM_PROBE_MODELS` |
+| TTS first byte | 316 ms | Sarvam synthesis plus the Singapore → India hop |
+| Turn end (parallel) | 577 ms | `VAD_MIN_SILENCE` (silero's 0.55 s default was the whole figure) |
+| **End-to-end** | **1144 ms** | |
+
+Below ~500 ms end-to-end is out of reach for any STT → LLM → TTS pipeline
+over public APIs: the STT has to hear silence first, and each stage pays a
+network round trip. Getting there takes a single speech-to-speech model,
+which would give up the Sarvam voices and the inline Moss recall.
 
 What makes a comparison real rather than noise:
 
