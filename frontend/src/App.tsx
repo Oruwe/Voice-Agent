@@ -30,6 +30,7 @@ function App() {
     startMicrophone,
     stopMicrophone,
     toggleMute,
+    sendChat,
   } = useLiveKit();
 
   const showSignIn = !session && connectionPhase === "signed_out";
@@ -95,6 +96,7 @@ function App() {
       onStartMic={startMicrophone}
       onStopMic={stopMicrophone}
       onToggleMute={toggleMute}
+      onSendChat={sendChat}
       signInSlot={signInSlot}
       showSignIn={showSignIn}
       accessToken={session?.accessToken}
