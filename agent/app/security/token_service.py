@@ -22,17 +22,20 @@ import asyncio
 import logging
 import os
 
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, Header, HTTPException, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app.db.base import get_session_maker
 from app.db.models import Tenant, TenantStatus, User, UserStatus
 from app.db.session_manager import AuditRecorder, SecurityEventRecorder, is_tenant_verified
 from app.context.document_processor import chunk_text, parse_document
+from app.context.knowledge_service import KnowledgeService, KnowledgeUnavailableError
 from app.context.moss_provider import MossContextProvider
 from app.context.qdrant_provider import QdrantProvider
+from app.mcp_server import MAX_TOP_K, handle_message as handle_mcp_message
 from app.security.identity import AuthenticatedIdentity, IdentityResolutionError, resolve_identity
 from app.security.jwt_auth import AuthError, create_access_token, decode_access_token
 from app.security.livekit_identity import mint_livekit_token
@@ -60,6 +63,29 @@ app.add_middleware(
     allow_methods=["POST"],
     allow_headers=["Content-Type", "Authorization"],
 )
+
+
+def _moss_client():
+    return MossContextProvider(
+        project_id=os.environ["MOSS_PROJECT_ID"], project_key=os.environ["MOSS_PROJECT_KEY"],
+    ).client
+
+
+_knowledge = KnowledgeService(_moss_client)
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+def _max_upload_bytes() -> int:
+    # Moss loads a whole index into the querying process, and both the API and
+    # the voice worker run in 1 GB. A 40 MB PDF made an index that OOM-killed the
+    # worker at every call start, so the cap is on the input, where it's cheap.
+    return int(float(os.environ.get("MAX_UPLOAD_MB", "10")) * 1024 * 1024)
 
 
 class DevTokenRequest(BaseModel):
@@ -261,8 +287,19 @@ async def upload_document(
     identity = await _resolve_bearer(authorization)
     tenant_id = identity.tenant_slug  # Moss/Qdrant use the slug as namespace
 
-    content = await file.read()
     filename = file.filename or "document"
+    limit = _max_upload_bytes()
+    if file.size is not None and file.size > limit:
+        raise HTTPException(
+            status_code=413,
+            detail=f"{filename} is over the {limit // (1024 * 1024)} MB limit. Upload the relevant sections instead.",
+        )
+    content = await file.read()
+    if len(content) > limit:
+        raise HTTPException(
+            status_code=413,
+            detail=f"{filename} is over the {limit // (1024 * 1024)} MB limit. Upload the relevant sections instead.",
+        )
     content_type = file.content_type or ""
     try:
         # pypdf and python-docx are synchronous and CPU-bound. Run inline, a
@@ -308,5 +345,100 @@ async def upload_document(
         except Exception:
             logger.exception("qdrant upsert failed for tenant %s doc %s", tenant_id, doc_id)
 
+    # The knowledge search endpoints answer from an in-memory copy; reload it
+    # so this document is searchable without restarting the service.
+    _spawn(_knowledge.refresh(tenant_id))
+
     logger.info("indexed doc %s for tenant %s: %d chunks", doc_id, tenant_id, len(chunks))
     return UploadDocumentResponse(document_id=doc_id, chunks=len(chunks), status="indexed")
+
+
+class AgentKeyResponse(BaseModel):
+    agent_key: str
+    expires_in: int
+    tenant_id: str
+
+
+@app.post("/v1/agent-keys", response_model=AgentKeyResponse)
+async def issue_agent_key(authorization: str = Header(...)) -> AgentKeyResponse:
+    """A long-lived bearer token for another agent to call the knowledge API.
+
+    Same token format and verification as the 1-hour session token -- every
+    request still re-resolves the identity against Postgres, so disabling the
+    user or tenant revokes every key they issued.
+    """
+    identity = await _resolve_bearer(authorization)
+    expires_in = int(float(os.environ.get("AGENT_KEY_TTL_DAYS", "30")) * 86400)
+    key = create_access_token(
+        subject=identity.external_id, tenant_slug=identity.tenant_slug, expires_in=expires_in,
+    )
+    return AgentKeyResponse(agent_key=key, expires_in=expires_in, tenant_id=str(identity.tenant_id))
+
+
+class KnowledgeQueryRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=2000)
+    top_k: int = Field(default=3, ge=1, le=MAX_TOP_K)
+
+
+class KnowledgeHitOut(BaseModel):
+    text: str
+    score: float | None
+    source: str | None
+    chunk: str | None
+
+
+class KnowledgeQueryResponse(BaseModel):
+    query: str
+    hits: list[KnowledgeHitOut]
+    took_ms: float
+    index_ready: bool
+
+
+@app.post("/v1/knowledge/query", response_model=KnowledgeQueryResponse)
+async def query_knowledge(
+    body: KnowledgeQueryRequest, authorization: str = Header(...),
+) -> KnowledgeQueryResponse:
+    """Search the caller's knowledge base. The tool other agents call."""
+    identity = await _resolve_bearer(authorization)
+    try:
+        result = await _knowledge.search(tenant_id=identity.tenant_slug, query=body.query, top_k=body.top_k)
+    except KnowledgeUnavailableError as e:
+        logger.exception("knowledge query failed for tenant %s", identity.tenant_slug)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail="The knowledge base is temporarily unavailable.",
+        ) from e
+    return KnowledgeQueryResponse(
+        query=body.query,
+        hits=[KnowledgeHitOut(text=h.text, score=h.score, source=h.source, chunk=h.chunk) for h in result.hits],
+        took_ms=result.took_ms,
+        index_ready=result.index_ready,
+    )
+
+
+@app.post("/mcp")
+async def mcp_endpoint(request: Request, authorization: str | None = Header(default=None)) -> Response:
+    """MCP over stateless Streamable HTTP; see app/mcp_server.py."""
+    identity = await _resolve_bearer(authorization or "")
+
+    async def search(query: str, top_k: int):
+        return await _knowledge.search(tenant_id=identity.tenant_slug, query=query, top_k=top_k)
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(
+            {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}},
+            status_code=400,
+        )
+
+    if isinstance(payload, list):
+        replies = [r for r in [await handle_mcp_message(m, search=search) for m in payload] if r is not None]
+        return JSONResponse(replies) if replies else Response(status_code=202)
+    reply = await handle_mcp_message(payload, search=search)
+    return JSONResponse(reply) if reply is not None else Response(status_code=202)
+
+
+@app.get("/mcp")
+async def mcp_no_stream() -> Response:
+    # This server never pushes messages, so it offers no SSE stream.
+    return Response(status_code=405, headers={"Allow": "POST"})

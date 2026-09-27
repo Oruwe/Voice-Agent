@@ -1191,3 +1191,135 @@ input {
     min-height: 360px;
   }
 }
+
+/* ---------------------------------------------------------------------- */
+/* Agent API tab                                                          */
+/* ---------------------------------------------------------------------- */
+
+.agent-api {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.agent-api__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agent-api__title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.agent-api__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.agent-api__search {
+  padding: 0;
+  border-top: 0;
+}
+
+.agent-api__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.agent-api__badge {
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-success-soft);
+  color: var(--accent-success);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.agent-api__hits {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-api__hit {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+}
+
+.agent-api__hit-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.agent-api__hit-text {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.agent-api__block {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  min-width: 0;
+}
+
+.agent-api__block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.agent-api__label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.agent-api__copy {
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.agent-api__copy:hover {
+  color: var(--text);
+}
+
+.agent-api__code {
+  margin: 0;
+  padding: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
