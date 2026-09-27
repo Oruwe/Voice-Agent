@@ -109,3 +109,31 @@ async def test_send_notification_defaults_channel_to_push():
     # Still fails (stub), but must have passed validation to get there.
     assert "invalid arguments" not in (result.error or "")
     assert "No real backend is wired up for 'send_notification'" in result.error
+
+
+@pytest.mark.asyncio
+async def test_create_ticket_records_a_ticket_in_the_platform_log():
+    registry = build_tool_registry()
+
+    result = await registry.execute(
+        tool_name="create_ticket",
+        raw_args={"site_id": "SITE-14", "equipment_id": "INV-3", "description": "E-07 on inverter 3", "priority": "high"},
+        tenant_id="tenant-a", session_id="session-a",
+    )
+
+    assert result.success is True
+    assert result.output["ticket_id"].startswith("TKT-") and len(result.output["ticket_id"]) == 10
+    assert result.output["site_id"] == "SITE-14" and result.output["priority"] == "high"
+    assert result.output["system"] == "platform ticket log"
+
+
+@pytest.mark.asyncio
+async def test_create_ticket_still_rejects_invalid_input():
+    registry = build_tool_registry()
+
+    result = await registry.execute(
+        tool_name="create_ticket", raw_args={"site_id": "SITE-14", "description": "x", "priority": "asap"},
+        tenant_id="tenant-a", session_id="session-a",
+    )
+
+    assert result.success is False
