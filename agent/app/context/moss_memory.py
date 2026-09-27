@@ -85,6 +85,7 @@ class MossLiveMemory:
         budget_ms: float = 60.0,
         memory_logical_name: str = "session_context",
         knowledge_logical_name: str = "knowledge",
+        live_memory: bool = True,
     ) -> None:
         self._client = client
         self._tenant_id = tenant_id
@@ -92,6 +93,7 @@ class MossLiveMemory:
         self._top_k = top_k
         self._min_score = min_score
         self._budget_s = budget_ms / 1000.0
+        self._live_memory = live_memory
         self._memory_name = f"{tenant_id}__{memory_logical_name}"
         self._knowledge_name = f"{tenant_id}__{knowledge_logical_name}"
 
@@ -113,6 +115,15 @@ class MossLiveMemory:
         t0 = time.perf_counter()
 
         async def _open_session() -> None:
+            # The local SessionIndex loads Moss's embedding model into this
+            # process. On a 1 GB host that allocation is what pushes a live
+            # call past the cap, and the kernel SIGKILLs the worker with no
+            # traceback -- the agent greets, then dies before it can answer.
+            # MOSS_LIVE_MEMORY=false trades cross-call memory for a worker
+            # that survives; knowledge-base recall below is unaffected.
+            if not self._live_memory:
+                logger.info("moss: live session memory disabled (MOSS_LIVE_MEMORY)")
+                return
             try:
                 self._session = await self._client.session(self._memory_name)
             except Exception:

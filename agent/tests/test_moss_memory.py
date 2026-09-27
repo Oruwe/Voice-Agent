@@ -56,6 +56,37 @@ async def test_start_opens_tenant_scoped_indexes():
 
 
 @pytest.mark.asyncio
+async def test_live_memory_off_skips_the_local_index_but_keeps_knowledge():
+    """The local SessionIndex loads Moss's embedding model in-process, which is
+    what OOM-kills a 1 GB worker mid-call. Disabling it must leave
+    knowledge-base recall -- a plain cloud query -- fully working."""
+    client, session = make_client(knowledge_docs=[_doc("k1", "pump P-7 seal: 2000 h", 0.8)])
+    mem = MossLiveMemory(client, tenant_id="acme", session_id="room1", live_memory=False)
+    await mem.start()
+
+    assert mem.ready
+    client.session.assert_not_awaited()
+    client.load_index.assert_awaited_once_with("acme__knowledge")
+
+    result = await mem.recall("when is the seal replaced")
+    assert [h.source for h in result.hits] == ["knowledge"]
+    session.query.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_live_memory_off_makes_remember_and_close_no_ops():
+    client, session = make_client()
+    mem = MossLiveMemory(client, tenant_id="acme", session_id="room1", live_memory=False)
+    await mem.start()
+
+    await mem.remember(role="user", text="pump 4 is leaking")
+    await mem.close()
+
+    session.add_docs.assert_not_called()
+    session.push_index.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_missing_knowledge_index_still_ready_with_memory_only():
     client, session = make_client(session_docs=[_doc("1", "user: pump 4 leaking", 0.9)], knowledge_exists=False)
     mem = MossLiveMemory(client, tenant_id="t", session_id="s")
