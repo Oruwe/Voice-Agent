@@ -10,6 +10,23 @@ The LLM is whatever `LLM_CHAIN` names, tried left to right — `groq,gemini`
 by default, with a Sarvam option for India-local inference. See
 `agent/app/voice_providers/llm_chain.py`.
 
+## Knowledge tool for other agents
+
+Documents uploaded in the console become a knowledge base any other agent can
+query, answered from Moss in milliseconds. Create a key in the console's
+**Agent API** tab (`POST /v1/agent-keys`), then either:
+
+- **MCP**: point any MCP client at `https://<api>/mcp` with
+  `Authorization: Bearer <key>`. It exposes one read-only tool,
+  `search_knowledge(query, top_k)`. For Claude Code:
+  `claude mcp add --transport http fieldops https://<api>/mcp --header "Authorization: Bearer <key>"`
+- **REST**: `POST /v1/knowledge/query` with `{"query": "...", "top_k": 3}`.
+
+Both return the matching passages with their source document, score and the
+search time. The MCP server is stateless Streamable HTTP with JSON replies
+(`agent/app/mcp_server.py`) and has been checked against the official MCP
+Python client.
+
 This README is the current, verified entry point. `STATUS_REPORT.md` is the
 detailed build log from the original backend build session — useful
 history, but superseded by this file and by the test results below where

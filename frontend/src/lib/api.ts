@@ -101,3 +101,45 @@ export async function uploadDocument(
 
   return (await response.json()) as UploadDocumentResponse;
 }
+
+export const API_URL = API_BASE_URL;
+
+async function postJson<T>(path: string, accessToken: string, body?: unknown): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new ApiRequestError(response.status, await parseErrorDetail(response));
+  }
+  return (await response.json()) as T;
+}
+
+export interface AgentKeyResponse {
+  agent_key: string;
+  expires_in: number;
+  tenant_id: string;
+}
+
+export function createAgentKey(accessToken: string): Promise<AgentKeyResponse> {
+  return postJson<AgentKeyResponse>("/v1/agent-keys", accessToken);
+}
+
+export interface KnowledgeHit {
+  text: string;
+  score: number | null;
+  source: string | null;
+  chunk: string | null;
+}
+
+export interface KnowledgeQueryResponse {
+  query: string;
+  hits: KnowledgeHit[];
+  took_ms: number;
+  index_ready: boolean;
+}
+
+export function queryKnowledge(accessToken: string, query: string, topK = 3): Promise<KnowledgeQueryResponse> {
+  return postJson<KnowledgeQueryResponse>("/v1/knowledge/query", accessToken, { query, top_k: topK });
+}

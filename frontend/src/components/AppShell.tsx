@@ -12,6 +12,7 @@ import { ToolEventCard } from "./ToolEventCard";
 import { ErrorBanner } from "./ErrorBanner";
 import { DocumentUpload } from "./DocumentUpload";
 import { LatencyMonitor } from "./LatencyMonitor";
+import { AgentApiPanel } from "./AgentApiPanel";
 
 interface AppShellProps {
   themePreference: ThemePreference;
@@ -40,7 +41,7 @@ interface AppShellProps {
   accessToken?: string | null;
 }
 
-type RightTab = "latency" | "documents" | "events";
+type RightTab = "latency" | "documents" | "events" | "agent";
 
 export function AppShell({
   themePreference,
@@ -203,6 +204,15 @@ export function AppShell({
                   <span className="panel-tabs__badge">{toolEvents.length}</span>
                 )}
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={rightTab === "agent"}
+                className={`panel-tabs__tab${rightTab === "agent" ? " is-active" : ""}`}
+                onClick={() => setRightTab("agent")}
+              >
+                Agent API
+              </button>
             </div>
             <div className="panel-tabs__panels">
               <div role="tabpanel" hidden={rightTab !== "latency"}>
@@ -213,6 +223,9 @@ export function AppShell({
               </div>
               <div role="tabpanel" hidden={rightTab !== "events"}>
                 <ToolEventCard events={toolEvents} isConnected={isConnected} />
+              </div>
+              <div role="tabpanel" hidden={rightTab !== "agent"}>
+                <AgentApiPanel accessToken={accessToken ?? null} />
               </div>
             </div>
           </section>
